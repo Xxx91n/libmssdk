@@ -4,12 +4,15 @@
 // 一次运行只打 `POST /luna/pc/track_v2`（外加一条免签名的 SEO 对照），
 // 每条 Arm 只改变声明出来的那几个字段，其余逐字节相同。
 //
-// 凭据边界：cookie 只从本机读取（环境变量 / 本机配置文件），不落盘、不打印；
-// 输出只有请求形状、脱敏设备号、签名长度和回包判定。
+// 凭据边界：cookie 只从本机读取（环境变量 / 本机配置文件 / 指定文件），不落盘、不打印；
+// 输出只有请求形状、脱敏设备号、签名长度、判定用的标量，以及曲目号末四位
+// （曲名与完整曲目号属于个人收听记录，不进输出，因此日志可以直接贴进票里）。
 //
 //   node tools/entitlement-matrix.mjs --list                       # 只看矩阵，不打网络
 //   node tools/entitlement-matrix.mjs --track <id> --arm good-ts   # 只跑一条
 //   node tools/entitlement-matrix.mjs --track <id> --repeat 2      # 跑全部（重复关键条）
+//   node tools/entitlement-matrix.mjs --track <id> --arm captured \
+//        --device <抓包 device_id> --iid <install_id> --fp <fp>     # 票里原本要的那一条
 
 import crypto from 'node:crypto'
 import fs from 'node:fs'
@@ -36,6 +39,7 @@ export const APP_PROFILES = {
  * - `ts`：libresoda 在配置为空时落到 URL 里的毫秒时间戳（13 位，每次都不一样）。
  * - `rand16`：本仓库 `randomDeviceId()` 的 16 位形状，每次运行换一个。
  * - `service`：本服务落盘的那一份身份（`data/identity.json`）。
+ * - `captured`：外部传进来的那一份（抓包得到的真实设备身份，走 `--device/--iid/--fp`）。
  */
 export function buildIdentity(shape, seed = {}) {
     if (shape === 'ts') {
@@ -49,6 +53,15 @@ export function buildIdentity(shape, seed = {}) {
     }
     if (shape === 'service') {
         return { deviceId: seed.deviceId, iid: seed.iid, fp: seed.fp, shape }
+    }
+    if (shape === 'captured') {
+        if (!seed.deviceId) throw new Error('captured 身份需要 --device <device_id>（抓包得到的那一份）')
+        return {
+            deviceId: seed.deviceId,
+            iid: seed.iid || seed.deviceId,
+            fp: seed.fp || seed.deviceId,
+            shape,
+        }
     }
     throw new Error(`未知设备身份形状：${shape}`)
 }
@@ -124,21 +137,21 @@ export const ARMS = [
         expect: '整曲（正对照：复刻本机播放器正在拿到整曲的那条请求）',
         changes: '身份=毫秒时间戳（每次不同）· 客户端 3.3.0 · local-user=1 · 带 Cookie',
         touches: [],
-        arm: { identity: 'ts', app: APP_PROFILES.luna330, localUser: '1', useCookie: true },
+        request: { identity: 'ts', app: APP_PROFILES.luna330, localUser: '1', useCookie: true },
     },
     {
         name: 'rand16',
         expect: '待定：只把身份换成一个全新的 16 位设备号',
         changes: '身份=全新随机 16 位（其余与 good-ts 相同）',
         touches: ['query.device_id', 'query.iid', 'query.fp'],
-        arm: { identity: 'rand16', app: APP_PROFILES.luna330, localUser: '1', useCookie: true },
+        request: { identity: 'rand16', app: APP_PROFILES.luna330, localUser: '1', useCookie: true },
     },
     {
         name: 'service-id',
         expect: '待定：复刻当初扫 7 首全试听时的那份身份',
         changes: '身份=服务落盘的固定 16 位（其余与 good-ts 相同）',
         touches: ['query.device_id', 'query.iid', 'query.fp'],
-        arm: { identity: 'service', app: APP_PROFILES.luna330, localUser: '1', useCookie: true },
+        request: { identity: 'service', app: APP_PROFILES.luna330, localUser: '1', useCookie: true },
     },
     {
         name: 'probe-shape',
@@ -153,49 +166,56 @@ export const ARMS = [
             'header.user-agent',
             'header.x-luna-is-local-user',
         ],
-        arm: { identity: 'service', app: APP_PROFILES.luna380, localUser: '0', useCookie: true },
+        request: { identity: 'service', app: APP_PROFILES.luna380, localUser: '0', useCookie: true },
     },
     {
         name: 'app380',
         expect: '待定：只把版本号/UA 推到 3.8.0，身份仍用时间戳',
         changes: '客户端 3.8.0（身份仍是时间戳）',
         touches: ['query.version_name', 'query.version_code', 'header.user-agent'],
-        arm: { identity: 'ts', app: APP_PROFILES.luna380, localUser: '1', useCookie: true },
+        request: { identity: 'ts', app: APP_PROFILES.luna380, localUser: '1', useCookie: true },
     },
     {
         name: 'localuser0',
         expect: '待定：只把 x-luna-is-local-user 从 1 改成 0',
         changes: 'local-user=0（身份仍是时间戳）',
         touches: ['header.x-luna-is-local-user'],
-        arm: { identity: 'ts', app: APP_PROFILES.luna330, localUser: '0', useCookie: true },
+        request: { identity: 'ts', app: APP_PROFILES.luna330, localUser: '0', useCookie: true },
+    },
+    {
+        name: 'captured',
+        expect: '票里原本要求的那一条：抓包来的真实设备身份（需要 --device/--iid/--fp）',
+        changes: '身份=外部传入的那一份（其余与 good-ts 相同）',
+        touches: ['query.device_id', 'query.iid', 'query.fp'],
+        request: { identity: 'captured', app: APP_PROFILES.luna330, localUser: '1', useCookie: true },
     },
     {
         name: 'no-cookie',
-        expect: '预期试听（匿名对照：证明 Cookie 确实被服务端采纳）',
+        expect: '待定（匿名对照：Cookie 在这条接口上到底参与不参与判定）',
         changes: '不发 Cookie（其余与 good-ts 相同）',
         touches: ['header.cookie'],
-        arm: { identity: 'ts', app: APP_PROFILES.luna330, localUser: '1', useCookie: false },
+        request: { identity: 'ts', app: APP_PROFILES.luna330, localUser: '1', useCookie: false },
     },
     {
         name: 'sig-mismatch',
         expect: '预期空 body（签名失效对照：证明非空回包=签名被接受）',
         changes: '请求形状与基线逐字节相同，只是用另一个 16 位设备号签名',
         touches: [],
-        arm: { identity: 'ts', app: APP_PROFILES.luna330, localUser: '1', useCookie: true, signWith: 'other16' },
+        request: { identity: 'ts', app: APP_PROFILES.luna330, localUser: '1', useCookie: true, signWith: 'other16' },
     },
     {
         name: 'no-sign',
         expect: '预期空 body（无签名对照：证明前一条不是"根本不需要签名"）',
         changes: '请求形状与基线逐字节相同，只是不带 x-helios / x-medusa',
         touches: [],
-        arm: { identity: 'ts', app: APP_PROFILES.luna330, localUser: '1', useCookie: true, skipSign: true },
+        request: { identity: 'ts', app: APP_PROFILES.luna330, localUser: '1', useCookie: true, skipSign: true },
     },
     {
         name: 'seo-web',
         expect: '免签名基线：曲目本身多长、试听多长、是否会员曲',
         changes: '不走签名，GET h5/seo_track',
         touches: ['(整条请求都不同：免签名的网页接口)'],
-        arm: { seo: true },
+        request: { seo: true },
     },
 ]
 
@@ -245,71 +265,83 @@ function argValue(name, fallback = '') {
     return index >= 0 && process.argv[index + 1] ? process.argv[index + 1] : fallback
 }
 
-/** init 之后有一个「短签名窗口」，所以每条 arm 都签两次、只用第二次的那一份。 */
+/** 曲目号只留末四位：日志和读数可以直接贴进票里，不会反出个人收听记录。 */
+export function maskTrackId(trackId) {
+    const value = String(trackId || '')
+    return value.length <= 4 ? value : `***${value.slice(-4)}`
+}
+
+/** 把一次回包收成判定用的读数：去掉曲名与完整曲目号（曲名是个人收听记录）。 */
+export function armReadings(rawBody, trackId) {
+    const { name, trackId: returnedId, ...rest } = summarizeTrackV2Response(rawBody, trackId)
+    return { ...rest, track: maskTrackId(returnedId || trackId) }
+}
+
+function rowFrom(base, response, text, context, extra = {}) {
+    return {
+        ...base,
+        ...extra,
+        http: response.status,
+        bodyBytes: text.length,
+        ...armReadings(text, context.trackId),
+        ...extractScalars(text),
+    }
+}
+
+/** 换设备号必然重新 init，而 init 后的头几次签名可能落在短签名窗口里；
+ *  每条 arm 先签一次丢掉、只用第二次的那一份，免得把窗口效应读成形状效应。 */
 function signWarmedUp(signer, { url, headers }, deviceId) {
     const pairs = Object.fromEntries(headers)
     signer.sign({ url, headers: pairs, deviceId })
     return signer.sign({ url, headers: pairs, deviceId })
 }
 
-async function runArm(arm, context) {
+export async function runArm(arm, context) {
     const base = {
         arm: arm.name,
         expect: arm.expect,
         changes: arm.changes,
     }
-    if (arm.arm.seo) {
+    if (arm.request.seo) {
         const url = `${SEO_TRACK}?${encodeSortedParams({ track_id: context.trackId, device_platform: 'web' })}`
         const response = await fetch(url, {
             headers: [['user-agent', WEB_UA]],
             signal: AbortSignal.timeout(context.timeoutMs),
         })
-        const text = await response.text()
-        return {
-            ...base,
-            http: response.status,
-            bodyBytes: text.length,
-            ...summarizeTrackV2Response(text, context.trackId),
-            ...extractScalars(text),
-        }
+        return rowFrom(base, response, await response.text(), context)
     }
 
-    const seed =
-        arm.arm.identity === 'service'
-            ? { deviceId: context.service.deviceId, iid: context.service.iid, fp: context.service.fp }
-            : {}
-    const identity = buildIdentity(arm.arm.identity, seed)
-    const signDevice = arm.arm.signWith === 'other16' ? randomDeviceId() : identity.deviceId
+    const seeds = {
+        service: context.service,
+        captured: context.captured,
+    }
+    const identity = buildIdentity(arm.request.identity, seeds[arm.request.identity] || {})
+    const signDevice = arm.request.signWith === 'other16' ? randomDeviceId() : identity.deviceId
     const spec = buildPcTrackV2Request({
         trackId: context.trackId,
         identity,
-        app: arm.arm.app,
-        localUser: arm.arm.localUser,
-        cookie: arm.arm.useCookie ? context.cookie : '',
+        app: arm.request.app,
+        localUser: arm.request.localUser,
+        cookie: arm.request.useCookie ? context.cookie : '',
     })
-    const signed = arm.arm.skipSign ? { headers: {}, deviceId: identity.deviceId } : signWarmedUp(context.signer, spec, signDevice)
+    const signed = arm.request.skipSign
+        ? { headers: {}, deviceId: identity.deviceId }
+        : signWarmedUp(context.signer, spec, signDevice)
     const response = await fetch(spec.url, {
         method: 'POST',
         headers: [...spec.headers, ...Object.entries(signed.headers)],
         body: spec.body,
         signal: AbortSignal.timeout(context.timeoutMs),
     })
-    const text = await response.text()
-    return {
-        ...base,
-        http: response.status,
-        signed: !arm.arm.skipSign,
-        identityShape: identity.shape,
+    return rowFrom(base, response, await response.text(), context, {
+        signed: !arm.request.skipSign,
         deviceId: maskDeviceId(identity.deviceId),
         signDeviceId: maskDeviceId(signDevice),
         signedHeaders: Object.keys(signed.headers).length,
         signatureLengths: Object.fromEntries(
             Object.entries(signed.headers).map(([name, value]) => [name.toLowerCase(), String(value).length]),
         ),
-        bodyBytes: text.length,
-        ...summarizeTrackV2Response(text, context.trackId),
-        ...extractScalars(text),
-    }
+    })
 }
 
 async function main() {
@@ -323,27 +355,39 @@ async function main() {
     }
     const arms = only ? ARMS.filter(item => item.name === only) : ARMS
     if (!arms.length) throw new Error(`未知 arm：${only}（可选：${ARMS.map(item => item.name).join(' / ')}）`)
+    // 跑整份矩阵时没有 --device 就跳过 captured，而不是让它在中间炸掉；
+    // 明确 --arm captured 时则让它按 buildIdentity 的报错说话。
+    const skipCaptured = !only && !argValue('device')
+    const runnable = skipCaptured ? arms.filter(item => item.name !== 'captured') : arms
+    if (skipCaptured) process.stderr.write('跳过 captured：这条需要 --device <抓包 device_id>（其余 arm 照跑）\n')
     if (!trackId) throw new Error('需要 --track <track_id>（或 --list）')
 
     const config = loadConfig()
-    const cookie = readCookie(cookieSource)
-    if (!cookie) process.stderr.write('警告：没读到 cookie，带 Cookie 的 arm 会退化成匿名\n')
+    let cookie = ''
+    try {
+        cookie = readCookie(cookieSource)
+    } catch (error) {
+        if (argValue('cookie-from')) throw error
+        process.stderr.write(`没读到 cookie（${String(error?.message || error).split('\n')[0]}）\n`)
+    }
+    if (!cookie) process.stderr.write('警告：带 Cookie 的 arm 会退化成匿名\n')
     const signer = new BdmsSigner({ modulePath: config.bdmsModule, deviceId: config.deviceId })
     const context = {
         trackId,
         cookie,
         timeoutMs: config.requestTimeoutMs,
         service: { deviceId: config.deviceId, iid: config.iid, fp: config.fp },
+        captured: { deviceId: argValue('device'), iid: argValue('iid'), fp: argValue('fp') },
         signer,
     }
 
     process.stderr.write(
         `签名器：${path.basename(config.bdmsModule || '(无)')}｜本机身份：${maskDeviceId(config.deviceId)}｜` +
-            `cookie：${cookie ? `${cookie.split(';').length} 个字段` : '无'}｜曲目：${trackId}\n`,
+            `cookie：${cookie ? `${cookie.split(';').length} 个字段` : '无'}｜曲目：${maskTrackId(trackId)}\n`,
     )
     const rows = []
     for (let round = 0; round < repeat; round += 1) {
-        for (const arm of arms) {
+        for (const arm of runnable) {
             const row = await runArm(arm, context)
             rows.push({ round: round + 1, ...row })
             process.stdout.write(`${JSON.stringify(row)}\n`)
@@ -352,6 +396,7 @@ async function main() {
     const verdict = rows.map(row => ({
         arm: row.arm,
         round: row.round,
+        track: row.track,
         http: row.http,
         bytes: row.bodyBytes,
         fullTrack: row.fullTrack ?? null,
