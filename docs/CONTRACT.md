@@ -93,7 +93,8 @@ URL 参数里，即可保证「签名器 / URL」用同一份设备号。
 ```jsonc
 {
   "track_id": "7501674235158431760",
-  "cookie": "sessionid_ss=…",     // 可选；不传就是匿名（VIP 曲目只会得到试听）
+  "cookie": "sessionid_ss=…",     // 可选；实测在会给出整曲的曲目上，不发 Cookie 也照样整曲
+                                   // （签名才是取流凭据；没测过的组合见调查报告第七节）
   "device_id": "<device_id>", // 可选，默认取服务自身的设备身份（见 /config）
   "iid": "<install_id>",
   "fp": "<device_id>"

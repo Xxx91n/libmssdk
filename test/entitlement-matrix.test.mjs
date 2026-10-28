@@ -161,17 +161,24 @@ test('captured 身份必须显式给设备号，缺了就报错而不是悄悄�
     })
 })
 
-test('报错信息里的本机绝对路径会被换成文件名（日志要被人贴进票里）', () => {
+test('报错信息里的本机绝对路径整段隐掉，带空格的用户名/目录也算 (#10 日志要能贴进票里)', () => {
     const cases = [
-        'bdms.node 不存在：D:\\Users\\someone\\nope\\bdms.node',
-        'bdms.node 不存在：D:/Users/someone/nope/bdms.node',
-        'bdms.node 不存在：/home/someone/vendor/soda-music/bdms.node',
+        'bdms.node 不存在：D:\\Users\\Jean Dupont\\vendor\\soda-music\\bdms.node',
+        'bdms.node 不存在：C:\\Program Files\\Soda Music\\resources\\app.asar.unpacked\\bdms.node',
+        'bdms.node 不存在：D:/Users/Jean/nope/bdms.node',
+        'bdms.node 不存在：/home/jean dupont/vendor/soda-music/bdms.node',
     ]
     for (const message of cases) {
         const out = safeMessage(new Error(message))
-        assert.equal(out, 'bdms.node 不存在：bdms.node', `没剥掉路径：${out}`)
+        assert.ok(!/[\\/]/.test(out), `路径漏出来了：${out}`)
+        assert.ok(!/Jean|Program Files|home/i.test(out), `本机目录或用户名漏出来：${out}`)
+        assert.match(out, /bdms\.node 不存在/)
     }
-    assert.equal(safeMessage(new Error('未找到 bdms.node：请设置 LIBMSSDK_CLIENT_DIR')), '未找到 bdms.node：请设置 LIBMSSDK_CLIENT_DIR')
+    assert.equal(
+        safeMessage(new Error('未找到 bdms.node：请设置 LIBMSSDK_CLIENT_DIR')),
+        '未找到 bdms.node：请设置 LIBMSSDK_CLIENT_DIR',
+    )
+    assert.equal(safeMessage(new Error('captured 需要 --device <抓包 device_id>')), 'captured 需要 --device <抓包 device_id>')
 })
 
 test('读数不带曲名与完整曲目号，所以日志可以直接贴进票里', () => {

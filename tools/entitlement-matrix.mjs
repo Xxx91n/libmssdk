@@ -426,14 +426,18 @@ async function main() {
 }
 
 /**
- * 错误信息里可能带着本机绝对路径（`bdms.node 不存在：D:\Users\…`），
- * 而这份日志是要被人贴进票里的：绝对路径一律换成文件名。
+ * 错误信息里可能带着本机绝对路径（`bdms.node 不存在：D:\Users\…`），而这份日志是要被人
+ * 贴进票里的。路径里可能含空格，正则截断会把「到第一个空格为止」的后半段漏出去，
+ * 所以这里不做局部替换：认出绝对路径就把整段路径隐掉，只留下是哪一步失败。
  */
+const WINDOWS_PATH = /[A-Za-z]:[\\/]/
+const POSIX_PATH = /(?:^|[^A-Za-z0-9])\/[^\s/]{2,}\/[^\s/]/
+
 export function safeMessage(error) {
-    return String(error?.message || error).replace(
-        /(?:[A-Za-z]:[\\/](?:[^\s"'`]+)?|(?:\/[^\s/"'`]+){2,}(?:\/[^\s/"'`]+)?)/g,
-        match => path.basename(match) || match,
-    )
+    const text = String(error?.message || error)
+    if (!WINDOWS_PATH.test(text) && !POSIX_PATH.test(text)) return text
+    const stage = text.split(/[：:]/)[0].trim()
+    return `${stage || '出错'}：<本机路径已省略>`
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
