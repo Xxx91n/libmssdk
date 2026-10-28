@@ -217,6 +217,7 @@ async function signOn(portIndex, { url, method = 'POST', body = '', headers, dev
         })
         const text = await response.text()
         if (response.status !== 200) {
+            // 非 200 的回包是服务的错误形状（{ok,error,code}），不含签名值，截断后留作诊断
             const error = new Error(`/sign HTTP ${response.status}: ${text.slice(0, 160)}`)
             error.served = true
             throw error
@@ -225,8 +226,9 @@ async function signOn(portIndex, { url, method = 'POST', body = '', headers, dev
         try {
             payload = JSON.parse(text)
         } catch (error) {
-            // 200 但回包不是 JSON：进程在答话，只是答得不对，不能算「起不来」
-            const wrapped = new Error(`/sign 回包不是 JSON：${String(error.message).slice(0, 120)}`)
+            // 200 但回包不是 JSON：进程在答话，只是答得不对，不能算「起不来」。
+            // 这里不带正文片段——还没解析成功，签名值来不及登记为敏感，正文一律不落盘
+            const wrapped = new Error(`/sign 回包不是 JSON（${Buffer.byteLength(text)} 字节，正文不记录）：${String(error.message).slice(0, 80)}`)
             wrapped.served = true
             throw wrapped
         }
