@@ -418,28 +418,32 @@ async function main() {
     const expectedMask = maskDeviceId(device.deviceId)
     const masksOk = healthMasks.every(mask => mask && mask === expectedMask)
     const allRawSeen = processIdentities.every(info => info)
-    const agreeWithEachOther = allRawSeen && processIdentities.every(info => tupleOf(info) === tupleOf(processIdentities[0]))
+    // 「彼此相同」至少得有两个进程可比：单端口（手跑 --host-ports 一个值）不能空成立
+    const comparable = allRawSeen && processIdentities.length >= 2
+    const agreeWithEachOther = comparable && processIdentities.every(info => tupleOf(info) === tupleOf(processIdentities[0]))
     const agreeWithFile = allRawSeen && processIdentities.every(info => tupleOf(info) === fileTuple)
     const sources = [...new Set(processIdentities.filter(Boolean).map(info => info.source || '?'))].join('/')
     // 判据说的是「两个进程读到同一份身份」：主语是进程之间，身份文件与 /healthz 是印证
     let identityStatus
     let identityNote
-    if (allRawSeen && !agreeWithEachOther) {
+    if (comparable && !agreeWithEachOther) {
         identityStatus = 'FAIL'
         identityNote = `两个进程各自解析出的设备成套（device_id/iid/fp）互不相同：分裂（属 #2 的范围）；各自的来源 ${sources}`
-    } else if (allRawSeen && agreeWithEachOther && !agreeWithFile) {
-        // 进程之间一致，但和共享文件对不上：判据主体成立，「来自这份文件」的印证缺失，
+    } else if (comparable && !agreeWithFile) {
+        // 进程之间一致，但和共享文件对不上：判据主体成立，「来自这份文件」的印证断了，
         // 原因这里分不出来（显式覆盖？卷挂错？），所以只到 PARTIAL 并留下 source 供人核对
         identityStatus = 'PARTIAL'
-        identityNote = `两个进程的设备成套逐字节相同，但与共享身份文件不一致（各自来源 ${sources}）——可能是 LIBMSSDK_DEVICE_ID 之类的显式覆盖，也可能是状态目录挂错，本脚本分不出来，需要人工核对`
-    } else if (allRawSeen && agreeWithFile) {
+        identityNote = `两个进程的设备成套逐字节相同，但与共享身份文件不一致（各自来源 ${sources}）——可能是显式覆盖，也可能是状态目录挂错，本脚本分不出来，需要人工核对`
+    } else if (comparable) {
         identityStatus = masksOk ? 'PASS' : 'PARTIAL'
         identityNote = masksOk
             ? `两个进程各自解析出的设备成套逐字节相同，且等于共享身份文件（来源 ${sources}）；/healthz 的脱敏值作为第二道印证也一致`
             : '设备成套的原值比对通过（两个进程相同且等于身份文件），但有进程的 /healthz 读不到脱敏值，第二道印证缺失'
     } else if (masksOk) {
         identityStatus = 'PARTIAL'
-        identityNote = '有进程的 /config 读不到原值（鉴权或进程未响应），只比了脱敏的前 3 后 3 位——不足以证明同一份身份'
+        identityNote = allRawSeen
+            ? `只有 ${processIdentities.length} 个进程，进程之间无从比对，只比了脱敏的前 3 后 3 位——不足以证明「共用同一份身份」`
+            : '有进程的 /config 读不到原值（鉴权或进程未响应），只比了脱敏的前 3 后 3 位——不足以证明同一份身份'
     } else {
         identityStatus = 'BLOCKED'
         identityNote = '原值与脱敏值都读不到，身份判据无法执行（不等于身份分裂）'
@@ -452,7 +456,7 @@ async function main() {
             masked: healthMasks[index],
             source: processIdentities[index]?.source || null,
             rawSeen: Boolean(processIdentities[index]),
-            agreesWithOtherProcesses: allRawSeen ? agreeWithEachOther : null,
+            agreesWithOtherProcesses: comparable ? agreeWithEachOther : null,
             agreesWithSharedFile: allRawSeen ? tupleOf(processIdentities[index]) === fileTuple : null,
         })),
         maskedValuesMatch: masksOk,
