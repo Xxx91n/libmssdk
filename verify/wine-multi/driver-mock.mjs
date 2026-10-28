@@ -190,7 +190,8 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
                 const response = await fetch(`http://127.0.0.1:${ports[index]}/config`, { signal: AbortSignal.timeout(5000) })
                 if (!response.ok) return null
                 const payload = await response.json()
-                return payload?.identity?.device_id || null
+                const identity = payload?.identity
+                return identity?.device_id ? identity : null
             } catch {
                 return null
             }

@@ -405,34 +405,38 @@ async function main() {
     // 原值只在内存比对），/healthz 的脱敏值作为第二道印证。
     // 拿 /sign 的回包比是循环论证：那回的是我们发过去的 id，身份分裂也照样"一致"。
     const healthMasks = []
-    const processDeviceIds = []
+    const processIdentities = []
     for (let index = 0; index < driver.hostPorts.length; index += 1) {
         healthMasks.push((await driver.healthz(index))?.deviceId || '')
-        const raw = await driver.configIdentity(index)
-        if (raw) redactor.forbid(raw, 'device_id')
-        processDeviceIds.push(raw || '')
+        const info = await driver.configIdentity(index)
+        for (const key of ['device_id', 'iid', 'fp']) redactor.forbid(info?.[key], key)
+        processIdentities.push(info || null)
     }
+    // 整套设备一起比：#1 的规矩是 device_id / iid / fp 必须成套一致，只比 device_id 会漏
+    const tupleOf = info => `${info.device_id}|${info.iid || ''}|${info.fp || ''}`
+    const fileTuple = `${device.deviceId}|${device.iid || ''}|${device.fp || ''}`
     const expectedMask = maskDeviceId(device.deviceId)
     const masksOk = healthMasks.every(mask => mask && mask === expectedMask)
-    const allRawSeen = processDeviceIds.every(id => id)
-    const agreeWithEachOther = processDeviceIds.length >= 2 && processDeviceIds.every(id => id === processDeviceIds[0])
-    const agreeWithFile = allRawSeen && processDeviceIds.every(id => id === device.deviceId)
-    // 判据说的是「两个进程读到同一份身份」：主语是进程之间，身份文件只是印证
+    const allRawSeen = processIdentities.every(info => info)
+    const agreeWithEachOther = allRawSeen && processIdentities.every(info => tupleOf(info) === tupleOf(processIdentities[0]))
+    const agreeWithFile = allRawSeen && processIdentities.every(info => tupleOf(info) === fileTuple)
+    const sources = [...new Set(processIdentities.filter(Boolean).map(info => info.source || '?'))].join('/')
+    // 判据说的是「两个进程读到同一份身份」：主语是进程之间，身份文件与 /healthz 是印证
     let identityStatus
     let identityNote
     if (allRawSeen && !agreeWithEachOther) {
         identityStatus = 'FAIL'
-        identityNote = '两个进程各自解析出的设备号互不相同：device_id 分裂（属 #2 的范围）'
+        identityNote = `两个进程各自解析出的设备成套（device_id/iid/fp）互不相同：分裂（属 #2 的范围）；各自的来源 ${sources}`
     } else if (allRawSeen && agreeWithEachOther && !agreeWithFile) {
-        // 判据的主语是「两个进程读到同一份身份」：两个进程一致就成立。
-        // 与共享文件不同是 config.mjs 里 LIBMSSDK_DEVICE_ID 覆盖的既定行为，另说，不算这里失败
-        identityStatus = 'PASS'
-        identityNote = '两个进程各自解析出的设备号逐字节相同；但与共享身份文件不同——按 config.mjs 这是显式覆盖（LIBMSSDK_DEVICE_ID / QISHUI_DEVICE_ID）的既定行为，落在这里只作记录'
+        // 进程之间一致，但和共享文件对不上：判据主体成立，「来自这份文件」的印证缺失，
+        // 原因这里分不出来（显式覆盖？卷挂错？），所以只到 PARTIAL 并留下 source 供人核对
+        identityStatus = 'PARTIAL'
+        identityNote = `两个进程的设备成套逐字节相同，但与共享身份文件不一致（各自来源 ${sources}）——可能是 LIBMSSDK_DEVICE_ID 之类的显式覆盖，也可能是状态目录挂错，本脚本分不出来，需要人工核对`
     } else if (allRawSeen && agreeWithFile) {
         identityStatus = masksOk ? 'PASS' : 'PARTIAL'
         identityNote = masksOk
-            ? '两个进程各自解析出的设备号逐字节相同，且等于共享身份文件；/healthz 的脱敏值作为第二道印证也一致'
-            : '原值比对通过（两个进程相同且等于身份文件），但有进程的 /healthz 读不到脱敏值，第二道印证缺失'
+            ? `两个进程各自解析出的设备成套逐字节相同，且等于共享身份文件（来源 ${sources}）；/healthz 的脱敏值作为第二道印证也一致`
+            : '设备成套的原值比对通过（两个进程相同且等于身份文件），但有进程的 /healthz 读不到脱敏值，第二道印证缺失'
     } else if (masksOk) {
         identityStatus = 'PARTIAL'
         identityNote = '有进程的 /config 读不到原值（鉴权或进程未响应），只比了脱敏的前 3 后 3 位——不足以证明同一份身份'
@@ -446,11 +450,13 @@ async function main() {
         perProcess: driver.hostPorts.map((port, index) => ({
             port,
             masked: healthMasks[index],
-            rawSeen: Boolean(processDeviceIds[index]),
+            source: processIdentities[index]?.source || null,
+            rawSeen: Boolean(processIdentities[index]),
             agreesWithOtherProcesses: allRawSeen ? agreeWithEachOther : null,
-            agreesWithSharedFile: allRawSeen ? processDeviceIds[index] === device.deviceId : null,
+            agreesWithSharedFile: allRawSeen ? tupleOf(processIdentities[index]) === fileTuple : null,
         })),
         maskedValuesMatch: masksOk,
+        comparedFields: ['device_id', 'iid', 'fp'],
         note: identityNote,
     }
     if (identityStatus === 'FAIL') recordFailure('identity', null, 'unclassified', identityNote)
