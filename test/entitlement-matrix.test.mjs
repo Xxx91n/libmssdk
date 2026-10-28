@@ -168,6 +168,8 @@ test('报错信息里的路径整段隐掉，带空格的用户名/目录也算 
         'bdms.node 不存在：D:/Users/Jean/nope/bdms.node',
         'bdms.node 不存在：D:\\bdms.node',
         'bdms.node 不存在：/soda music/vendor/bdms.node',
+        'bdms.node 不存在：/bdms.node',
+        'bdms.node 不存在：\\\\srv\\share\\bdms.node',
         "Cannot find module '/app/client/bdms.node'",
         "Cannot find module '/wine/jean dupont/x/bdms.node'",
     ]
@@ -189,17 +191,17 @@ test('报错信息里的路径整段隐掉，带空格的用户名/目录也算 
 test('读数不带曲名与完整曲目号，所以日志可以直接贴进票里', () => {
     const row = armReadings(
         JSON.stringify({
-            track: { id: '7151823294864295937', name: '某首私人歌单里的歌', duration: 185262 },
+            track: { id: '7000000000000000001', name: '某首私人歌单里的歌', duration: 185262 },
             track_player: {
                 video_model: JSON.stringify({ video_duration: 185.309, video_list: [] }),
             },
         }),
-        '7151823294864295937',
+        '7000000000000000001',
     )
     const text = JSON.stringify(row)
     assert.equal(row.fullTrack, true)
-    assert.equal(row.track, '***5937')
-    assert.ok(!text.includes('7151823294864295937'), '完整曲目号不该出现在读数里')
+    assert.equal(row.track, '***0001')
+    assert.ok(!text.includes('7000000000000000001'), '完整曲目号不该出现在读数里')
     assert.ok(!text.includes('某首私人歌单里的歌'), '曲名不该出现在读数里')
     assert.equal(maskTrackId('123'), '123')
 })
@@ -222,7 +224,7 @@ test('CLI 直接跑 captured 而不给 --device 时，报错要说清缺什么�
 test('真实那条路径（stub fetch，不打网络）：签名头在最后、读数脱敏到底', async () => {
     const { BdmsSigner } = await import('../src/bdms.mjs')
     const context = {
-        trackId: '7151823294864295937',
+        trackId: '7000000000000000001',
         cookie: 'sessionid_ss=SECRET-COOKIE',
         timeoutMs: 5000,
         service: { deviceId: '1000000000000001', iid: '2000000000000002', fp: '1000000000000001' },
@@ -230,7 +232,7 @@ test('真实那条路径（stub fetch，不打网络）：签名头在最后、�
     }
     context.signer = new BdmsSigner({ modulePath: mockBdms, deviceId: context.service.deviceId })
     const payload = JSON.stringify({
-        track: { id: '7151823294864295937', name: '私人曲目名', duration: 185262 },
+        track: { id: '7000000000000000001', name: '私人曲目名', duration: 185262 },
         track_player: {
             url_player_info: 'https://example.com/play?sign=SECRET-URL',
             video_model: JSON.stringify({
@@ -249,12 +251,12 @@ test('真实那条路径（stub fetch，不打网络）：签名头在最后、�
         const row = await runArm(ARMS.find(item => item.name === 'captured'), context)
         assert.equal(row.fullTrack, true)
         assert.equal(row.deviceId, '500***005')
-        assert.equal(row.track, '***5937')
+        assert.equal(row.track, '***0001')
         const reading = JSON.stringify(row)
         assert.ok(!reading.includes('SECRET-COOKIE'), 'cookie 不得进读数')
         assert.ok(!reading.includes('SECRET-URL'), '播放地址不得进读数')
         assert.ok(!reading.includes('私人曲目名'), '曲名不得进读数')
-        assert.ok(!reading.includes('7151823294864295937'), '完整曲目号不得进读数')
+        assert.ok(!reading.includes('7000000000000000001'), '完整曲目号不得进读数')
         assert.deepEqual(seen[0].headers.slice(-2).map(([name]) => name), ['X-Helios', 'X-Medusa'])
         assert.ok(seen[0].url.includes('device_id=5000000000000005'), 'captured 用的必须是传进来的那份设备号')
     } finally {

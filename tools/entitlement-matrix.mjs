@@ -432,9 +432,8 @@ async function main() {
  * `C:\Users\Jean Dupont\…`），截断点总落在用户名之前。所以逐个 token 判断——
  * 只要这段文字里带着路径分隔符且不是一个孤零零的分隔符，就整段换成占位符。
  * 副作用是把 `src/x/y.rs` 这类相对路径也一并隐掉：宁可多隐，不隐漏。
- * 已知隐不掉的形态：不带任何后续段落的单段绝对路径（`/bdms.node`），以及单独出现的
- * UNC 主机名（`\\srv`）——两者在 Windows 原生与 Docker + Wine 两种部署里都到不了。
- * 见调查报告第七节。
+ * 实测覆盖：带空格用户名的 win 路径、`Program Files`、无冒号的容器路径、盘根
+ * `D:\bdms.node`、首段带空格的 posix（`/soda music/…`）、单段 `/bdms.node`、UNC。
  */
 const PATHISH = /\S[\\/]\S|\S[\\/]$|^[\\/]\S/
 
