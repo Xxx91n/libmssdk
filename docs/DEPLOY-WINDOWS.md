@@ -10,7 +10,7 @@
 | Node.js 18+ | 唯一必装项。从你的客户端复制文件后，实测 v24 可直接加载原生模块 |
 | 签名模块 | 由你提供：从自己安装的汽水客户端复制 `bdms.node` + `metasecml.dll` 到 `vendor/soda-music/` |
 | 设备身份 | **自动生成**：首次运行随机生成 16 位 `device_id`/`iid`/`fp` 并写入 `data/identity.json`，跨重启复用 |
-| 账号 Cookie | 可选但 VIP 曲目必需；用 libresoda 的扫码登录或从客户端抓 |
+| 账号 Cookie | 由调用方随请求带来带去，本服务不存。注意它**不是整曲的开关**：实测有授权的曲目在完全不发 Cookie 时也给出整曲 6 档；决定整曲与否的是曲目授权（未验证的组合列在调查报告第七节） |
 
 > `vendor/soda-music/` 里的两个官方文件被 `.gitignore` 忽略，不要提交或分发。
 > 也可以不复制文件，直接设 `LIBMSSDK_CLIENT_DIR` 指向客户端版本目录。
