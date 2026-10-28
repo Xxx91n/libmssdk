@@ -91,7 +91,7 @@ export LIBMSSDK_CLIENT_DIR="/path/to/Soda Music/3.7.0"
 | `LIBMSSDK_DEVICE_ID` / `LIBMSSDK_IID` / `LIBMSSDK_FP` | 覆盖设备身份 |
 | `LIBMSSDK_TOKEN` | HTTP 服务鉴权 Token |
 | `LIBMSSDK_STATE_DIR` | 设备身份 `identity.json` 的保存目录；首次启动用独占创建写入，state 目录可用时多个进程同时首次启动也只生成一份（慢 IO 下的残留窗口见 `docs/DEPLOY-WINDOWS.md`） |
-| `LIBMSSDK_IDENTITY_READ_BUDGET_MS` | 判定身份文件「损坏而非正在被写」的等待预算（默认 1000ms）；慢 IO 部署可调，非正数或非法值回退默认 |
+| `LIBMSSDK_IDENTITY_READ_BUDGET_MS` | 判定身份文件「损坏而非正在被写」的等待预算（默认 1000ms）；慢 IO 部署出现并发误判时可调大（降级路径阻塞随之变长），非正数或非法值回退默认 |
 
 Cloudflare Workers 不能运行 `bdms.node` / `metasecml.dll`，因此不能承载本服务的签名
 执行层。Worker 只能作为鉴权、限流或转发网关。
