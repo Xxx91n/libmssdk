@@ -61,6 +61,17 @@ die() {
     exit 3
 }
 
+# 带值选项先整体校验一遍：`--rounds` 光挂着会让下面 `$2` 在 set -u 下炸成退出码 1，
+# 而文档里 1 是「失败」、3 才是「用法不满足」
+for ((index = 1; index <= $#; index += 1)); do
+    case "${!index}" in
+        --mode | --track | --rounds | --ready-timeout-ms | --client-dir | --env-file | --image | --dockerfile | --serve-ports | --host-ports | --scenario | --node | --data-volume | --wine-volume)
+            next=$((index + 1))
+            [[ $next -le $# && "${!next}" != --* ]] || die "${!index} 需要带值"
+            ;;
+    esac
+done
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --mode) MODE=$2; shift 2 ;;

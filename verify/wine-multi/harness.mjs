@@ -414,20 +414,44 @@ async function main() {
     }
     const expectedMask = maskDeviceId(device.deviceId)
     const masksOk = healthMasks.every(mask => mask && mask === expectedMask)
-    const rawComparable = processDeviceIds.every(id => id)
-    const rawMatch = rawComparable && processDeviceIds.every(id => id === device.deviceId)
-    report.criteria.identity = {
-        status: rawComparable ? rawMatch && masksOk ? 'PASS' : 'FAIL' : masksOk ? 'PARTIAL' : 'BLOCKED',
-        expected: expectedMask,
-        perProcess: driver.hostPorts.map((port, index) => ({ port, masked: healthMasks[index], rawMatchesFile: processDeviceIds[index] ? processDeviceIds[index] === device.deviceId : null })),
-        maskedValuesMatch: masksOk,
-        note: rawComparable
-            ? rawMatch
-                ? `两个进程各自解析出的设备号与共享身份文件逐字节相同，/healthz 脱敏值也一致`
-                : '两个进程身份不一致（原值比对）：device_id 分裂属 #2 的范围；本验证在起进程前已落盘身份，正常不该出现'
-            : '有进程的 /config 读不到原值，只能比脱敏的前 3 后 3 位——不足以证明同一份身份，记 PARTIAL',
+    const allRawSeen = processDeviceIds.every(id => id)
+    const agreeWithEachOther = processDeviceIds.length >= 2 && processDeviceIds.every(id => id === processDeviceIds[0])
+    const agreeWithFile = allRawSeen && processDeviceIds.every(id => id === device.deviceId)
+    // 判据说的是「两个进程读到同一份身份」：主语是进程之间，身份文件只是印证
+    let identityStatus
+    let identityNote
+    if (allRawSeen && !agreeWithEachOther) {
+        identityStatus = 'FAIL'
+        identityNote = '两个进程各自解析出的设备号互不相同：device_id 分裂（属 #2 的范围）'
+    } else if (allRawSeen && agreeWithEachOther && !agreeWithFile) {
+        identityStatus = 'FAIL'
+        identityNote = '两个进程彼此一致，但都和共享身份文件不同——多半是 LIBMSSDK_DEVICE_ID 覆盖，属另一件事，不是这里要证的同一份身份'
+    } else if (allRawSeen && agreeWithFile) {
+        identityStatus = masksOk ? 'PASS' : 'PARTIAL'
+        identityNote = masksOk
+            ? '两个进程各自解析出的设备号逐字节相同，且等于共享身份文件；/healthz 的脱敏值作为第二道印证也一致'
+            : '原值比对通过（两个进程相同且等于身份文件），但有进程的 /healthz 读不到脱敏值，第二道印证缺失'
+    } else if (masksOk) {
+        identityStatus = 'PARTIAL'
+        identityNote = '有进程的 /config 读不到原值（鉴权或进程未响应），只比了脱敏的前 3 后 3 位——不足以证明同一份身份'
+    } else {
+        identityStatus = 'BLOCKED'
+        identityNote = '原值与脱敏值都读不到，身份判据无法执行（不等于身份分裂）'
     }
-    if (report.criteria.identity.status !== 'PASS') recordFailure('identity', null, 'unclassified', report.criteria.identity.note)
+    report.criteria.identity = {
+        status: identityStatus,
+        expected: expectedMask,
+        perProcess: driver.hostPorts.map((port, index) => ({
+            port,
+            masked: healthMasks[index],
+            rawSeen: Boolean(processDeviceIds[index]),
+            agreesWithOtherProcesses: agreeWithEachOther || null,
+            agreesWithSharedFile: allRawSeen ? processDeviceIds[index] === device.deviceId : null,
+        })),
+        maskedValuesMatch: masksOk,
+        note: identityNote,
+    }
+    if (identityStatus === 'FAIL') recordFailure('identity', null, 'unclassified', identityNote)
 
     // ——— 判据 2：各自签的头各打一次真实上游 ———
     const hasUpstream = Boolean(cookie && trackId)
@@ -686,8 +710,9 @@ try {
             fs.writeFileSync(file, serialized)
             say(`[verify] 结果写入 ${file}`)
         } catch (error) {
+            // 说「通过」却没能留下证据，才算失败；已经有非零退出码的结论不被改写
             process.stdout.write(`[verify] 结果写盘失败：${redactor.sanitize('write', String(error?.message || error))}\n`)
-            process.exitCode = 1
+            if (report.verdict === 'PASS') process.exitCode = 1
         }
         if (report.verdict === 'FAIL') process.exitCode = 1
         if (report.verdict === 'INCOMPLETE') process.exitCode = 2
