@@ -7,9 +7,10 @@
 // 之后回头读赢家的值。
 //
 // 写入只有一个入口 prepareStoredIdentity()：入口命令启动时都会走到它（除了用
-// LIBMSSDK_DEVICE_ID 钉死设备号那种，那时根本不碰身份文件），所以「只有一个写入者」
-// 靠的是独占创建本身 —— 无论哪个进程赢，磁盘上都只有一份。将来 worker 池落地后，
-// worker 侧改用 readStoredIdentity()，那条路径上没有任何创建或改写的代码。
+// LIBMSSDK_DEVICE_ID / QISHUI_DEVICE_ID 钉死设备号那种，那时根本不碰身份文件），
+// 所以「只有一个写入者」靠的是独占创建本身 —— 无论哪个进程赢，磁盘上都只有一份。
+// 将来 worker 池落地后，worker 侧改用 readStoredIdentity()，
+// 那条路径上没有任何创建或改写的代码。
 
 import crypto from 'node:crypto'
 import fs from 'node:fs'
@@ -103,7 +104,8 @@ function inspectIdentityFile(dir) {
 }
 
 /** 两次观察是不是同一份东西：状态加上原文一起比，内容变了就不算「稳定」。
- *  读不动的几次观察算作同一份（错误文本不进指纹），否则一次抖动就会把等待预算重新起算。 */
+ *  读不动的几次观察算作同一份（错误文本不进指纹）：否则同样的读不动会因为错误文本不同
+ *  被判成「内容一直在变」，最后报成 churning 而不是 unreadable。 */
 function fingerprint(found) {
     return `${found.status}:${found.raw ?? ''}`
 }
