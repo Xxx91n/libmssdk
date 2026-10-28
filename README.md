@@ -26,10 +26,10 @@ libresoda / 第三方客户端
 
 不需要设备号与登录设备一致，也不依赖 Cookie——对照实验（同一个签名器、同一台机器）显示
 随机设备号、服务落盘的固定设备号、甚至完全不带 Cookie，对同一首有授权的曲子都给出同样的
-整曲 6 档；而只回 30–60 秒试听的那几首，换任何设备号都还是试听。
-所以决定权在曲目授权层，不在设备身份层。判据与复现步骤见
-[`docs/INVESTIGATION-DEVICE-ENTITLEMENT.md`](docs/INVESTIGATION-DEVICE-ENTITLEMENT.md)
-（里面写清了哪些是测量、哪些是外推：Cookie 的有无只在有授权的曲目上对比过）。
+整曲 6 档；两首试听级曲目用两种设备号形状复测也都还是 30–60 秒单档。
+所以决定权在曲目授权层，不在设备身份层。哪些组合还没测（Cookie 有无与真实登录设备在
+*试听级*曲目上、Cookie 缺哪个字段）写在报告的第七节，那几条是本结论的边界。判据与复现步骤见
+[`docs/INVESTIGATION-DEVICE-ENTITLEMENT.md`](docs/INVESTIGATION-DEVICE-ENTITLEMENT.md)。
 
 这不是「可以绕过权益」：没有授权的曲目换什么凭据都还是试听。它只是说明
 **应用签名本身就是取流凭据**，所以一台对多人开放的签名器，等于把你的出口 IP 和设备画像
