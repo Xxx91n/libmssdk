@@ -83,8 +83,8 @@ export QISHUI_SIGNER_TOKEN=<上面生成的 token>
 
 | 事项 | 说明 |
 | --- | --- |
-| 设备身份 | 首次启动用独占创建生成 `device_id`/`iid`/`fp`，落在 volume `libmssdk-data` 的 `identity.json`，容器重建不变、多个进程同时首次启动也只有一份；想重置换新 volume，想钉死用 `LIBMSSDK_DEVICE_ID` |
+| 设备身份 | 首次启动用独占创建生成 `device_id`/`iid`/`fp`，落在 volume `libmssdk-data` 的 `identity.json`，容器重建不变、state 目录可用时多个进程同时首次启动也只有一份（Wine / 网络卷的慢 IO 下仍有残留窗口，见 `../docs/DEPLOY-WINDOWS.md`）；想重置换新 volume，想钉死用 `LIBMSSDK_DEVICE_ID` |
 | ARM 主机 | 镜像里是 x86_64 的 Wine + Windows Node，ARM 机器上要靠 QEMU 模拟（很慢）；建议部署到 x86_64 主机 |
 | Node 版本 | 钉 `20.18.0`（`24` 在 Wine 下 CSPRNG 断言崩溃） |
-| 日志 | JSON 行输出到 stdout：`docker compose logs -f` |
+| 日志 | 事件 JSON 行走 stdout，身份降级告警走 stderr；`docker compose logs -f` 两路都收 |
 | 端口 | 容器内固定 8899，宿主机端口由 `deploy/.env` 的 `LIBMSSDK_PORT` 决定 |

@@ -14,9 +14,10 @@
 
 import crypto from 'node:crypto'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { logEvent } from './log.mjs'
+import { logWarn } from './log.mjs'
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const DEFAULT_STATE_DIR = path.join(PROJECT_ROOT, 'data')
@@ -32,9 +33,18 @@ const CREATE_ATTEMPTS = 3
 
 /** 独占创建成功的一方写盘需要时间，这段时间里文件可能是 0 字节或半截。把它判成「损坏」
  *  并挪走就会毁掉赢家的成果、重新分裂，所以要「连续两次读到同一份不合法内容」并且预算
- *  用完，才认定它是真的坏了。预算用完内容还在变（并发进程在反复动它）就不等了，直接放弃。 */
+ *  用完，才认定它是真的坏了。预算用完内容还在变（并发进程在反复动它）就不等了，直接放弃。
+ *  慢 IO（Wine / 网络卷）下这个预算是同步阻塞，可用 LIBMSSDK_IDENTITY_READ_BUDGET_MS 调小。 */
 const DEFAULT_READ_BUDGET_MS = 1000
 const READ_POLL_MS = 5
+
+function defaultReadBudgetMs() {
+    const raw = (process.env.LIBMSSDK_IDENTITY_READ_BUDGET_MS || '').trim()
+    if (!raw) return DEFAULT_READ_BUDGET_MS
+    const value = Number(raw)
+    // 0 或负数或非法值都退回默认：预算为 0 等于「观察到 in-flight 立刻放弃」，会把并发拆回多份
+    return Number.isFinite(value) && value > 0 ? value : DEFAULT_READ_BUDGET_MS
+}
 
 /** 写完回读核对的次数：读不动多半是几毫秒的抖动（EMFILE、杀软占用），多读两轮就过去了。 */
 const READBACK_POLLS = 3
@@ -46,6 +56,14 @@ function stateDir() {
 
 export function identityFile(dir = stateDir()) {
     return path.join(dir, IDENTITY_FILE_NAME)
+}
+
+/** 告警里的目录：把家目录折成 ~，别让用户名连同整段本机路径被贴进 issue。
+ *  fs 错误只取 error.code（message 里的路径可能是 8.3 短名，折不动）。 */
+function redactDir(dir) {
+    const home = os.homedir()
+    if (home && dir.startsWith(home)) return `~${dir.slice(home.length)}`
+    return dir
 }
 
 /** 设备号格式与官方客户端一致：16 位数字，首位 1-8。 */
@@ -184,7 +202,7 @@ function sleep(ms) {
  * 返回值里 created 表示「这份值是本次生成的」，persisted 表示「这份值已经在身份文件上」。
  * persisted 为 false 时 state 目录不可用或不可修，设备号只在内存里，重启会变，并留一条告警。
  */
-export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = DEFAULT_READ_BUDGET_MS, log = logEvent } = {}) {
+export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = defaultReadBudgetMs(), log = logWarn } = {}) {
     const warn = (reason, message) => log('identity', { level: 'warn', reason, message })
     /** 只把设备号留在内存里：跨重启会变，所以必须留一条告警。 */
     const inMemoryOnly = (identity, reason, message) => {
@@ -196,7 +214,7 @@ export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = DEFAULT
     try {
         fs.mkdirSync(dir, { recursive: true })
     } catch (error) {
-        return giveUp('state-dir-unusable', `身份目录建不出来，本次只在内存里保留设备号：${dir}（${error.message}）`)
+        return giveUp('state-dir-unusable', `身份目录建不出来，本次只在内存里保留设备号：${redactDir(dir)}（${error.code}）`)
     }
 
     // 一轮 = 一次独占创建尝试。退到下一轮只有三种来路：文件被人挪走了、刚挪走坏文件、
@@ -212,7 +230,7 @@ export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = DEFAULT
             )
         }
         if (created.status === 'failed') {
-            return giveUp('create-failed', `身份文件写不下去，本次只在内存里保留设备号：${created.error.message}`)
+            return giveUp('create-failed', `身份文件写不下去，本次只在内存里保留设备号（${created.error.code}）`)
         }
         // created.status === 'exists'：多半是别的进程刚刚建的，回读它的值，绝不覆盖。
 
@@ -232,7 +250,7 @@ export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = DEFAULT
             const seen = fingerprint(found)
             if (seen === lastSeen && now >= settleAt) {
                 if (found.status === 'unreadable') {
-                    return giveUp('unreadable', `身份文件读不动，本次只在内存里保留设备号：${found.error.message}`)
+                    return giveUp('unreadable', `身份文件读不动，本次只在内存里保留设备号（${found.error.code}）`)
                 }
                 // 动手之前再读最后一次：上面两次观察之间可能刚好有内容落进来（读 → 改名不是原子的），
                 // 这一眼把「以为坏了、其实已经写好」的窗口压到一次读的长度。
@@ -242,7 +260,7 @@ export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = DEFAULT
                 if (!retireCorruptIdentity(dir)) {
                     return giveUp('stuck', '身份文件内容不合法而且挪不动（可能被占用），本次只在内存里保留设备号')
                 }
-                warn('rebuild', `身份文件内容不合法，重建一个新设备号；原来的坏文件挪到了 ${identityFile(dir)}${CORRUPT_SUFFIX}`)
+                warn('rebuild', `身份文件内容不合法，重建一个新设备号；原来的坏文件挪到同目录的 ${IDENTITY_FILE_NAME}${CORRUPT_SUFFIX}`)
                 break
             }
             lastSeen = seen

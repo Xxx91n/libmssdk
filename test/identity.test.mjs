@@ -206,6 +206,31 @@ test('坏文件挪不动时不重建：留在原地、用内存里的设备号�
     })
 })
 
+test('身份告警走 stderr，不污染 stdout，也不带出整段本机路径', () => {
+    const base = tempStateDir()
+    const notADir = path.join(base, 'occupied')
+    fs.writeFileSync(notADir, 'x') // 拿一个普通文件当 state 目录：mkdirSync 必失败 → state-dir-unusable
+    const realOut = process.stdout.write.bind(process.stdout)
+    const realErr = process.stderr.write.bind(process.stderr)
+    let out = ''
+    let err = ''
+    let prepared
+    try {
+        process.stdout.write = chunk => ((out += String(chunk)), true)
+        process.stderr.write = chunk => ((err += String(chunk)), true)
+        prepared = prepareStoredIdentity({ dir: notADir }) // 用默认 log，不加注入，才能验到真实通道
+    } finally {
+        process.stdout.write = realOut
+        process.stderr.write = realErr
+        fs.rmSync(base, { recursive: true, force: true })
+    }
+    assert.equal(prepared.persisted, false)
+    assert.equal(out, '', `身份告警写进了 stdout，会打断 bridge / selftest 的 JSON.parse：${out}`)
+    assert.match(err, /"event":"identity"/, '告警应走 stderr')
+    assert.match(err, /"reason":"state-dir-unusable"/)
+    assert.ok(!err.includes(os.homedir()), `告警不该带出家目录（含用户名）：${err}`)
+})
+
 test('只读入口不创建也不改写，worker 只能拿到主进程留下的那一份', () => {
     withTempStateDir(({ dir }) => {
         assert.equal(readStoredIdentity(dir), null, '没有身份文件时只读入口不该生成')

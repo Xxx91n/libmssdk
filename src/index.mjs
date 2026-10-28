@@ -14,8 +14,10 @@ import { buildTrackV2Request, summarizeTrackV2Response } from './probe.mjs'
 import { errorResponse, normalizeSignRequest, signResponse } from './contract.mjs'
 import { logError, logEvent } from './log.mjs'
 
-// 身份在这里就完成「读到或用独占创建生成」：之后派生出去的 worker 只允许走
-// src/identity.mjs 的只读入口，任何进程内都不能再有第二条创建路径。
+// 身份在这里就完成「读到或用独占创建生成」。真正保证不分裂的是独占创建本身（见 src/identity.mjs），
+// 不是进程角色分工：现在每个入口命令（含被按次拉起的 bridge）启动都会走到这里，靠 wx 收敛。
+// TODO(#5)：worker 池落地后，worker 侧改走 identity.mjs 的只读入口 readStoredIdentity()，
+// 不保留任何创建路径。
 const config = loadConfig()
 const signer = new BdmsSigner({ modulePath: config.bdmsModule, deviceId: config.deviceId })
 
