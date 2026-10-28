@@ -446,7 +446,7 @@ async function main() {
             : '有进程的 /config 读不到原值（鉴权或进程未响应），只比了脱敏的前 3 后 3 位——不足以证明同一份身份'
     } else {
         identityStatus = 'BLOCKED'
-        identityNote = '原值与脱敏值都读不到，身份判据无法执行（不等于身份分裂）'
+        identityNote = `身份判据无法执行：${allRawSeen ? '进程数不足两个，做不了进程间比对' : '原值读不到（/config 未响应或鉴权）'}，${masksOk ? '且脱敏值不足以替代比对' : '脱敏值也读不到'}（不等于身份分裂）`
     }
     report.criteria.identity = {
         status: identityStatus,
