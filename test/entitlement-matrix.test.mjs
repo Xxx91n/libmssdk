@@ -161,31 +161,29 @@ test('captured 身份必须显式给设备号，缺了就报错而不是悄悄�
     })
 })
 
-test('报错信息里的本机绝对路径整段隐掉，带空格的用户名/目录也算 (#10 日志要能贴进票里)', () => {
-    const cases = [
+test('报错信息里的路径整段隐掉，带空格的用户名/目录也算 (#10 日志要能贴进票里)', () => {
+    const leaks = [
         'bdms.node 不存在：D:\\Users\\Jean Dupont\\vendor\\soda-music\\bdms.node',
         'bdms.node 不存在：C:\\Program Files\\Soda Music\\resources\\app.asar.unpacked\\bdms.node',
         'bdms.node 不存在：D:/Users/Jean/nope/bdms.node',
-        'bdms.node 不存在：/home/jean dupont/vendor/soda-music/bdms.node',
+        'bdms.node 不存在：D:\\bdms.node',
+        'bdms.node 不存在：/soda music/vendor/bdms.node',
+        "Cannot find module '/app/client/bdms.node'",
+        "Cannot find module '/wine/jean dupont/x/bdms.node'",
     ]
-    for (const message of cases) {
+    for (const message of leaks) {
         const out = safeMessage(new Error(message))
-        assert.ok(!/[\\/]/.test(out), `路径漏出来了：${out}`)
-        assert.ok(!/Jean|Program Files|home/i.test(out), `本机目录或用户名漏出来：${out}`)
-        assert.match(out, /bdms\.node 不存在/)
+        assert.ok(!/[\\/]/.test(out), `分隔符漏出来：${out}`)
+        assert.ok(!/Jean|Dupont|Program Files|soda music|Users|wine|home/i.test(out), `本机目录或用户名漏出来：${out}`)
+        assert.match(out, /本机路径已省略/)
     }
-    assert.equal(
-        safeMessage(new Error('未找到 bdms.node：请设置 LIBMSSDK_CLIENT_DIR')),
+    const clean = [
         '未找到 bdms.node：请设置 LIBMSSDK_CLIENT_DIR',
-    )
-    assert.equal(safeMessage(new Error('captured 需要 --device <抓包 device_id>')), 'captured 需要 --device <抓包 device_id>')
-    assert.equal(
-        safeMessage(new Error('跑整份矩阵时跳过 captured（可选：env / sodam / 文件路径）')),
+        'captured 需要 --device <抓包 device_id>',
         '跑整份矩阵时跳过 captured（可选：env / sodam / 文件路径）',
-    )
-    // 容器 / Wine 里 require 的报错没有冒号，同样必须隐掉
-    assert.equal(safeMessage(new Error(`Cannot find module '/app/client/bdms.node'`)), 'Cannot find module：<本机路径已省略>')
-    assert.equal(safeMessage(new Error(`Cannot find module '/wine/jean dupont/x/bdms.node'`)), 'Cannot find module：<本机路径已省略>')
+        '未知 arm: seo（可选：good-ts / rand16）',
+    ]
+    for (const message of clean) assert.equal(safeMessage(new Error(message)), message)
 })
 
 test('读数不带曲名与完整曲目号，所以日志可以直接贴进票里', () => {

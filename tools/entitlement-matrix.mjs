@@ -428,18 +428,28 @@ async function main() {
 /**
  * 错误信息里可能带着本机绝对路径（`bdms.node 不存在：D:\Users\…`、
  * `Cannot find module '/app/client/bdms.node'`），而这份日志是要被人贴进票里的。
- * 路径可以带任何空格，按空格截断会把用户名那一段漏出去，所以这里定位到路径的起点，
- * 把它之后的整段隐掉，只保留「是哪一步失败」。posix 绝对路径不要求消息里有冒号，
- * 容器里那些 `Cannot find module '…'` 同样得隐掉。
+ * 按空格或按冒号截断都不可靠：路径的每一段都可能带空格（`/soda music/…`、
+ * `C:\Users\Jean Dupont\…`），截断点总落在用户名之前。所以逐个 token 判断——
+ * 只要这段文字里带着路径分隔符且不是一个孤零零的分隔符，就整段换成占位符。
+ * 副作用是把 `src/x/y.rs` 这类相对路径也一并隐掉：宁可多隐，不隐漏。
+ * 已知隐不掉的形态：不带任何后续段落的单段绝对路径（`/bdms.node`），以及单独出现的
+ * UNC 主机名（`\\srv`）——两者在 Windows 原生与 Docker + Wine 两种部署里都到不了。
+ * 见调查报告第七节。
  */
-const PATH_START = /(?:[A-Za-z]:[\\/]|\/[^\s"']{1,}[\\/])/
+const PATHISH = /\S[\\/]\S|\S[\\/]$|^[\\/]\S/
 
 export function safeMessage(error) {
     const text = String(error?.message || error)
-    const match = PATH_START.exec(text)
-    if (!match) return text
-    const head = text.slice(0, match.index).replace(/[\s：:="'`]+$/, '')
-    return `${head || '出错'}：<本机路径已省略>`
+    const parts = text.split(/(\s+)/)
+    let elided = 0
+    const out = parts
+        .map(part => {
+            if (!PATHISH.test(part) || /^['"`]$/.test(part)) return part
+            elided += 1
+            return '〈本机路径已省略〉'
+        })
+        .join('')
+    return elided ? out.replace(/〈本机路径已省略〉(\s*〈本机路径已省略〉)+/g, '〈本机路径已省略〉') : text
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
