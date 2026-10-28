@@ -103,6 +103,7 @@ export function resolveIdentity() {
     }
 }
 
+/** 主进程入口专用：这一步会准备身份文件（可能独占创建它）。worker 侧不要调这里，直接用 identity.mjs 的只读入口。 */
 export function loadConfig() {
     const clientDir = resolveClientDir()
     const bdmsModule = resolveBdmsModule()

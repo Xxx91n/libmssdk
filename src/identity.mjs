@@ -20,8 +20,12 @@ const DEFAULT_STATE_DIR = path.join(PROJECT_ROOT, 'data')
 
 const IDENTITY_FILE_NAME = 'identity.json'
 
-/** 确认损坏的身份文件挪到这里，不直接删：留着才知道这台机器曾经分裂过。 */
+/** 确认损坏的身份文件挪到这里。用固定名字，只留最近一份：不直接删，删掉就等于抹掉
+ *  「这台机器分裂过」的证据；但也不为每次损坏堆一堆文件。 */
 const CORRUPT_SUFFIX = '.corrupt'
+
+/** 独占创建的重试轮数：第二轮以后只可能由「并发进程刚刚挪走坏文件」触发。 */
+const CREATE_ATTEMPTS = 3
 
 /** 独占创建成功的一方写盘需要时间，这段时间里文件可能是 0 字节。
  *  把它判成「损坏」并挪走，就会毁掉赢家的成果、重新分裂，所以读不到时先等一会儿。 */
@@ -71,13 +75,25 @@ function parseStoredIdentity(raw) {
  * 文件不存在、读不出、格式不合法一律返回 null，由调用方决定怎么办。
  */
 export function readStoredIdentity(dir = stateDir()) {
+    return inspectIdentityFile(dir).identity || null
+}
+
+/**
+ * 读身份文件并把三种情况分开：没读到（absent / unreadable）和读到了但不合法（invalid）。
+ * 没读到过的东西不能当成坏文件挪走 —— 那等于把一份合法的身份换成第三张脸。
+ */
+function inspectIdentityFile(dir) {
+    const file = identityFile(dir)
     let raw
     try {
-        raw = fs.readFileSync(identityFile(dir), 'utf8')
-    } catch {
-        return null
+        raw = fs.readFileSync(file, 'utf8')
+    } catch (error) {
+        // ENOENT：还没人建，或并发进程刚刚把坏文件挪走
+        if (error.code === 'ENOENT') return { status: 'absent' }
+        return { status: 'unreadable', error }
     }
-    return parseStoredIdentity(raw)
+    const identity = parseStoredIdentity(raw)
+    return identity ? { status: 'valid', identity } : { status: 'invalid', raw }
 }
 
 /** 独占创建：本进程成功即说明它是唯一写入者。 */
@@ -136,7 +152,7 @@ function sleep(ms) {
  * persisted 为 false 时 state 目录不可写或不可修，设备号只在内存里，重启会变。
  */
 export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = DEFAULT_READ_BUDGET_MS, log = logEvent } = {}) {
-    const warn = (reason, message, detail = {}) => log('identity', { level: 'warn', reason, ...detail, message })
+    const warn = (reason, message) => log('identity', { level: 'warn', reason, message })
     const ephemeral = () => ({ identity: generateIdentity(), created: true, persisted: false })
 
     try {
@@ -146,8 +162,8 @@ export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = DEFAULT
         return ephemeral()
     }
 
-    // 一轮 = 一次独占创建尝试；只有「文件在，但读不出合法内容且已经等过」才会进入下一轮。
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    // 一轮 = 一次独占创建尝试。只有「文件在、读得到、但内容不合法且已经等过」才会退到下一轮。
+    for (let attempt = 0; attempt < CREATE_ATTEMPTS; attempt += 1) {
         const created = createIdentityFile(dir)
         if (created.identity) return { identity: created.identity, created: true, persisted: true }
         if (created.error) {
@@ -155,26 +171,29 @@ export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = DEFAULT
             return ephemeral()
         }
 
-        // 已存在（多半是别的进程刚刚建的）：等它写完，然后回读，绝不覆盖。
+        // 已存在（多半是别的进程刚刚建的）：回读赢家的值，绝不覆盖。
         const deadline = performance.now() + readBudgetMs
-        let stored = readStoredIdentity(dir)
-        while (!stored && performance.now() < deadline) {
+        for (;;) {
+            const found = inspectIdentityFile(dir)
+            if (found.status === 'valid') return { identity: found.identity, created: false, persisted: true }
+            if (found.status === 'absent') break
+            if (found.status === 'unreadable') {
+                warn('unreadable', `身份文件读不动，本次只在内存里保留设备号：${found.error.message}`)
+                return ephemeral()
+            }
+            if (performance.now() >= deadline) {
+                if (!retireCorruptIdentity(dir)) {
+                    warn('stuck', '身份文件内容不合法而且挪不动（可能被占用），本次只在内存里保留设备号')
+                    return ephemeral()
+                }
+                warn('rebuild', `身份文件内容不合法，重建一个新设备号；原来的坏文件挪到了 ${identityFile(dir)}${CORRUPT_SUFFIX}`)
+                break
+            }
+            // 读得到内容但不合法：可能是刚建好还没写完的空文件，所以先等创建者收工。
             sleep(READ_POLL_MS)
-            stored = readStoredIdentity(dir)
         }
-        if (stored) return { identity: stored, created: false, persisted: true }
-
-        if (!retireCorruptIdentity(dir)) {
-            warn('unreadable', '身份文件读不出合法设备号，而且挪不动（可能被占用），本次只在内存里保留设备号')
-            return ephemeral()
-        }
-        warn(
-            'rebuild',
-            `身份文件内容不合法，已挪到 ${IDENTITY_FILE_NAME}${CORRUPT_SUFFIX} 并重建一个新设备号`,
-            { dir },
-        )
     }
 
-    warn('unreadable', '身份文件反复读不出合法设备号，本次只在内存里保留设备号')
+    warn('stuck', `身份文件在 ${CREATE_ATTEMPTS} 次尝试里都没能读出一个合法设备号，本次只在内存里保留`)
     return ephemeral()
 }

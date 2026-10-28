@@ -78,8 +78,9 @@ async function raceStart(dir) {
         for (const result of results) {
             if (result?.error) throw new Error(`身份解析子进程失败：${result.error}`)
         }
-        if (output.length) throw new Error(`身份解析本不该出声，却输出了：${output.join('')}`)
-        return results
+        // 子进程的告警不单独判失败：并发进程等不到写盘时会重建一次，那是处理过的情况，
+        // 由下面的「目录里只有 identity.json」这一条抓住。出了错才把它一起打出来。
+        return { results, noise: output.join('').trim() }
     } finally {
         await Promise.all(
             children.map(async child => {
@@ -96,11 +97,12 @@ test(`${PROCESS_COUNT} 个进程同时首次启动 ${ROUNDS} 轮：设备号始�
     for (let round = 1; round <= ROUNDS; round += 1) {
         const dir = tempStateDir()
         try {
-            const results = await raceStart(dir)
+            const { results, noise } = await raceStart(dir)
+            const seen = noise ? `（子进程日志：${noise}）` : ''
             const deviceIds = new Set(results.map(item => item.deviceId))
             const winners = results.filter(item => item.created)
-            assert.equal(deviceIds.size, 1, `第 ${round} 轮分裂出 ${deviceIds.size} 个设备号：${JSON.stringify([...deviceIds])}`)
-            assert.equal(winners.length, 1, `第 ${round} 轮有 ${winners.length} 个进程自认为新建了身份`)
+            assert.equal(deviceIds.size, 1, `第 ${round} 轮分裂出 ${deviceIds.size} 个设备号：${JSON.stringify([...deviceIds])}${seen}`)
+            assert.equal(winners.length, 1, `第 ${round} 轮有 ${winners.length} 个进程自认为新建了身份${seen}`)
             assert.deepEqual(
                 results.filter(item => !item.persisted),
                 [],
@@ -162,6 +164,30 @@ test('内容损坏时重建并留下告警日志，坏文件挪开而不是删�
         } finally {
             fs.rmSync(dir, { recursive: true, force: true })
         }
+    }
+})
+
+test('身份文件读不动时不挪走它：没读到过内容的东西不能当成坏文件', () => {
+    const dir = tempStateDir()
+    try {
+        // identity.json 位置放一个目录：读它报的是 EISDIR 而不是 ENOENT，等价于「被占用 / 没权限」
+        fs.mkdirSync(identityFile(dir))
+        const notes = []
+        const prepared = prepareStoredIdentity({
+            dir,
+            readBudgetMs: 30,
+            log: (event, detail) => notes.push(detail),
+        })
+        assert.equal(prepared.persisted, false, '读不动时不该假装身份已经落盘')
+        assert.match(prepared.identity.device_id, /^[1-8]\d{15}$/)
+        assert.deepEqual(fs.readdirSync(dir), ['identity.json'], '读不动的那一份不该被挪走')
+        assert.equal(fs.existsSync(`${identityFile(dir)}.corrupt`), false)
+        assert.ok(
+            notes.some(item => item.level === 'warn'),
+            `读不动要留下告警：${JSON.stringify(notes)}`,
+        )
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
     }
 })
 
