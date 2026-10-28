@@ -95,8 +95,8 @@ async function raceStart(dir) {
         for (const result of results) {
             if (result?.error) throw new Error(`身份解析子进程失败：${result.error}`)
         }
-        // 子进程的告警不单独判失败：并发进程等不到写盘时会重建一次，那是处理过的情况，
-        // 由下面的「目录里只有 identity.json」这一条抓住。出了错才把它一起打出来。
+        // 子进程的告警不单独判失败：并发进程等不到写盘时会重建一次，那是处理过的情况。
+        // 分裂由下面的设备号断言抓，不用这里的日志抓。
         return { results, noise: output.join('').trim() }
     } finally {
         await Promise.all(
@@ -129,8 +129,9 @@ test(`${PROCESS_COUNT} 个进程同时首次启动 ${ROUNDS} 轮：设备号始�
             assert.equal(stored.device_id, results[0].deviceId, `第 ${round} 轮磁盘上的设备号和进程读到的不一致${seen}`)
             assert.equal(stored.fp, stored.device_id, `第 ${round} 轮 fp 没跟 device_id 成套${seen}`)
             // 目录里不该出现第二个身份文件，也不该出现「临时文件改名」留下的那种名字。
-            // identity.json.corrupt 允许出现：那说明某个创建者超过 1 秒没写完盘，
-            // 别人按规则把它当成坏文件挪走了 —— 是抖动的痕迹，不是分裂。
+            // identity.json.corrupt 允许出现：创建者卡住 1 秒以上时，别人会把它那份还是空的文件
+            // 当成坏文件挪走 —— 实测迟到的写入会把已被改名的那一份填满合法内容，所以这里不能改用
+            // 「.corrupt 的内容必须不合法」来区分抖动和真错；分裂由上面的设备号断言抓。
             const files = fs.readdirSync(dir).sort()
             assert.deepEqual(
                 files.filter(name => name !== 'identity.json' && name !== 'identity.json.corrupt'),

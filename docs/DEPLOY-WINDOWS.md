@@ -85,9 +85,10 @@ export QISHUI_SIGNER_URL=http://127.0.0.1:18899/sign
 
 服务以 SYSTEM/服务账号运行时，若仓库目录不可写，用 `LIBMSSDK_STATE_DIR`
 指一个可写目录放 `identity.json`。目录不可用时设备号只在内存里、重启就变，
-启动日志会留一条 `event=identity` 的告警（`reason` 说明是哪一种：建不出目录 / 写不下去 /
-读不回来 / 挪不动 / 一直在变）；`node src/index.mjs config` 里 `identity.persisted`
-为 `false` 说的是同一件事。
+启动日志会留一条 `event=identity` 的告警，`reason` 是六种之一：
+`state-dir-unusable`（建不出目录）、`create-failed`（写不下去）、`unconfirmed`（写得下去读不回来）、
+`unreadable`（读不动）、`stuck`（坏文件挪不动）、`churning`（内容一直在变）；
+`node src/index.mjs config` 里 `identity.persisted` 为 `false` 说的是同一件事。
 
 `identity.json` 里的内容读不出合法设备号时，服务把它挪到 `identity.json.corrupt`
 （保留证据，只留最近一份）并重建一个新设备号，日志留一条 `reason=rebuild` 的告警。
