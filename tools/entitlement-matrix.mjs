@@ -426,18 +426,20 @@ async function main() {
 }
 
 /**
- * 错误信息里可能带着本机绝对路径（`bdms.node 不存在：D:\Users\…`），而这份日志是要被人
- * 贴进票里的。路径里可能含空格，正则截断会把「到第一个空格为止」的后半段漏出去，
- * 所以这里不做局部替换：认出绝对路径就把整段路径隐掉，只留下是哪一步失败。
+ * 错误信息里可能带着本机绝对路径（`bdms.node 不存在：D:\Users\…`、
+ * `Cannot find module '/app/client/bdms.node'`），而这份日志是要被人贴进票里的。
+ * 路径可以带任何空格，按空格截断会把用户名那一段漏出去，所以这里定位到路径的起点，
+ * 把它之后的整段隐掉，只保留「是哪一步失败」。posix 绝对路径不要求消息里有冒号，
+ * 容器里那些 `Cannot find module '…'` 同样得隐掉。
  */
-const WINDOWS_PATH = /[A-Za-z]:[\\/]/
-const POSIX_PATH = /(?:^|[^A-Za-z0-9])\/[^\s/]{2,}\/[^\s/]/
+const PATH_START = /(?:[A-Za-z]:[\\/]|\/[^\s"']{1,}[\\/])/
 
 export function safeMessage(error) {
     const text = String(error?.message || error)
-    if (!WINDOWS_PATH.test(text) && !POSIX_PATH.test(text)) return text
-    const stage = text.split(/[：:]/)[0].trim()
-    return `${stage || '出错'}：<本机路径已省略>`
+    const match = PATH_START.exec(text)
+    if (!match) return text
+    const head = text.slice(0, match.index).replace(/[\s：:="'`]+$/, '')
+    return `${head || '出错'}：<本机路径已省略>`
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

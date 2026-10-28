@@ -179,6 +179,13 @@ test('报错信息里的本机绝对路径整段隐掉，带空格的用户名/�
         '未找到 bdms.node：请设置 LIBMSSDK_CLIENT_DIR',
     )
     assert.equal(safeMessage(new Error('captured 需要 --device <抓包 device_id>')), 'captured 需要 --device <抓包 device_id>')
+    assert.equal(
+        safeMessage(new Error('跑整份矩阵时跳过 captured（可选：env / sodam / 文件路径）')),
+        '跑整份矩阵时跳过 captured（可选：env / sodam / 文件路径）',
+    )
+    // 容器 / Wine 里 require 的报错没有冒号，同样必须隐掉
+    assert.equal(safeMessage(new Error(`Cannot find module '/app/client/bdms.node'`)), 'Cannot find module：<本机路径已省略>')
+    assert.equal(safeMessage(new Error(`Cannot find module '/wine/jean dupont/x/bdms.node'`)), 'Cannot find module：<本机路径已省略>')
 })
 
 test('读数不带曲名与完整曲目号，所以日志可以直接贴进票里', () => {
