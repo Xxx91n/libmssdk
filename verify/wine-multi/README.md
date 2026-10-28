@@ -127,3 +127,7 @@ bash verify/wine-multi/run.sh --mode mock
 一台 8 逻辑核机器上的量级观察：热态单次签名几十到一百多毫秒，Wine prefix 首启 20–40 秒，
 `init` 之后一小段窗口内可能出短签名、之后长度稳定。**绝对值换机器要重测**，脚本只记录
 观察到的长度，不拿它们当门禁——写死长度会让这台机器永远不就绪。
+
+「两个进程确实各自独立、又共用一个 wineserver」这件事的证据都在结果里：`processes[]` 的两个
+不同 pid、`tally.rounds.processes` 与 `observations.processesAfterKill` 里的 `node.exe` 计数、
+以及 `environment.wineserverCount`。脚本不去断言它们该等于几，只把看到的写下来。

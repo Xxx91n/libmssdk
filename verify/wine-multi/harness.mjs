@@ -97,15 +97,22 @@ class Redactor {
 
     forbid(value, kind) {
         const text = String(value || '')
-        if (text.length >= 4 && !this.#forbidden.some(item => item.text === text)) this.#forbidden.push({ text, kind })
+        if (text.length < 4) return
+        const existing = this.#forbidden.find(item => item.text === text)
+        // 同一个值可能同时是 device_id 和 fp（身份文件里就如此），别把它当成「没查过」
+        if (existing) {
+            if (!existing.kinds.includes(kind)) existing.kinds.push(kind)
+            return
+        }
+        this.#forbidden.push({ text, kinds: [kind] })
     }
 
     sanitize(where, text) {
         let output = String(text ?? '')
         for (const item of this.#forbidden) {
             if (!output.includes(item.text)) continue
-            this.leaks.push({ where, kind: item.kind })
-            output = output.split(item.text).join(`<已脱敏:${item.kind}>`)
+            this.leaks.push({ where, kind: item.kinds[0] })
+            output = output.split(item.text).join(`<已脱敏:${item.kinds.join('/')}>`)
         }
         return output
     }
@@ -113,13 +120,13 @@ class Redactor {
     /** 只查不改：用来扫服务自己的日志里有没有出现过敏感值。 */
     find(text) {
         const kinds = new Set()
-        for (const item of this.#forbidden) if (String(text || '').includes(item.text)) kinds.add(item.kind)
+        for (const item of this.#forbidden) if (String(text || '').includes(item.text)) item.kinds.forEach(kind => kinds.add(kind))
         return [...kinds]
     }
 
     /** 这次实际登记了哪些类别的敏感值。 */
     kinds() {
-        return [...new Set(this.#forbidden.map(item => item.kind))]
+        return [...new Set(this.#forbidden.flatMap(item => item.kinds))]
     }
 }
 
@@ -128,14 +135,18 @@ if (cookie) redactor.forbid(cookie, 'cookie')
 
 const say = (...parts) => process.stdout.write(`${redactor.sanitize('console', parts.join(' '))}\n`)
 
-const driver =
-    mode === 'mock'
+/** 控制面在 main 里才构造：端口或容器名写错要落到 try 的 catch，退 3 而不是裸栈退 1。 */
+let driver = null
+
+function createDriver() {
+    return mode === 'mock'
         ? createMockDriver({ scenario, cookie })
         : createDockerDriver({
               container: args.container || 'libmssdk-verify-wine',
               containerPorts: (args['container-ports'] || '8899,8900').split(',').map(Number),
               hostPorts: (args['host-ports'] || '18899,18900').split(',').map(Number),
           })
+}
 
 const report = {
     schema: 'libmssdk-verify-wine-multi/1',
@@ -292,6 +303,7 @@ async function upstreamWithSignature(portIndex, device) {
 
 async function main() {
     say(`[verify] 模式 ${mode}${scenario === 'ok' ? '' : ` / 注入场景 ${scenario}（彩排，不是真环境结论）`} — 起控制面…`)
+    driver = createDriver()
     await driver.start()
     report.processes = await driver.processes()
     report.environment = await driver.environment()
@@ -619,7 +631,7 @@ try {
     report.verdict = 'NOT_RUN'
     process.exitCode = 3
 } finally {
-    await driver.teardown?.()
+    await driver?.teardown?.()
     report.finishedAt = new Date().toISOString()
     // 先算 redaction 再序列化，否则写进文件的那份永远是空计数
     report.redaction = { forbidden: redactor.kinds(), leaks: redactor.leaks.length }
