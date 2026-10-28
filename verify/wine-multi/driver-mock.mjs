@@ -47,6 +47,10 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'libmssdk-verify-'))
     const stateDir = path.join(tmpDir, 'data')
     const logDir = path.join(tmpDir, 'logs')
+    // 「存活方挂住不应答」只能靠 SIGSTOP 造；Windows 上 Node 直接拒这个信号
+    // （ERR_UNKNOWN_SIGNAL 在 convertToValidSignal 就抛，不经过 libuv），所以提前拒绝，
+    // 而不是跑一半崩掉把结果文件和退出码一起吞了
+    const canStopProcess = process.platform !== 'win32'
     fs.mkdirSync(stateDir, { recursive: true })
     fs.mkdirSync(logDir, { recursive: true })
 
@@ -121,6 +125,9 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
         },
 
         async start() {
+            if (scenario === 'prefix-contention' && !canStopProcess) {
+                throw new Error('prefix-contention 这个场景要靠 SIGSTOP 造「进程挂着不应答」，Windows 上没有这个手段——请在 Linux/WSL 里跑彩排')
+            }
             // 与容器入口同一个前置动作：先把身份落盘，再拉起进程。
             const preflight = spawn(process.execPath, [path.join(PROJECT_ROOT, 'src', 'index.mjs'), 'config'], {
                 cwd: PROJECT_ROOT,
@@ -197,13 +204,14 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
 
         async stderrOf(index) {
             const entry = entryFor(index)
+            if (!entry) return { bytes: 0, tail: [] }
             let text = ''
             try {
                 text = fs.readFileSync(logPath('err', entry.port), 'utf8')
             } catch {
                 /* 还没写 */
             }
-            return { bytes: text.length, tail: tailLines(text) }
+            return { bytes: Buffer.byteLength(text), tail: tailLines(text) }
         },
         /** true = 进程在；false = 确认不在；null = 没有这个进程的记录，无法判断。 */
         async pidAlive(index) {
@@ -221,13 +229,25 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
         async killProcess(index) {
             const entry = entryFor(index)
             if (!entry || isDead(entry)) return
-            entry.child.kill('SIGTERM')
+            try {
+                entry.child.kill('SIGTERM')
+            } catch {
+                entry.child.kill('SIGKILL')
+            }
             // 注入「一个进程倒下把共享 prefix 拖垮」：Wine 下的可观察形态是同 prefix 的
             // 进程一起卡住（pid 还在、不应答、stderr 安静），这里用 SIGSTOP 复现。
-            if (scenario === 'prefix-contention') {
+            if (scenario === 'prefix-contention' && canStopProcess) {
                 stoppedSiblings = true
-                for (const other of children) if (other !== entry && !isDead(other)) other.child.kill('SIGSTOP')
+                for (const other of children) {
+                    if (other === entry || isDead(other)) continue
+                    try {
+                        other.child.kill('SIGSTOP')
+                    } catch {
+                        /* 单个停不住不挡住其余 */
+                    }
+                }
             }
+            return 'term'
         },
 
         async readIdentityFile() {
@@ -240,8 +260,17 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
 
         teardown() {
             for (const entry of children) {
-                if (stoppedSiblings) entry.child.kill('SIGCONT')
-                entry.child.kill('SIGKILL')
+                // 一个收尾失败不能挡住其余：停过 SIGSTOP 必须先放开才能收到 SIGKILL
+                try {
+                    if (stoppedSiblings && canStopProcess) entry.child.kill('SIGCONT')
+                    entry.child.kill('SIGKILL')
+                } catch {
+                    try {
+                        entry.child.kill('SIGKILL')
+                    } catch {
+                        /* 已经死了 */
+                    }
+                }
             }
             upstreamServer?.closeAllConnections?.()
             upstreamServer?.close()

@@ -52,6 +52,13 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv.slice(2))
+// 这些选项必须有值：`--rounds` 光写着会让 parseArgs 给出 true，而 Number(true) === 1，
+// 于是静默按 1 轮跑；--track 光写着会把字符串 "true" 当曲目 id
+for (const name of ['mode', 'scenario', 'track', 'rounds', 'ready-timeout-ms', 'container', 'container-ports', 'host-ports']) {
+    if (args[name] !== true) continue
+    console.log(`[verify] --${name} 需要带值`)
+    process.exit(3)
+}
 const mode = args.mode || 'docker'
 const scenario = args.scenario || 'ok'
 if (mode !== 'docker' && mode !== 'mock') {
@@ -248,6 +255,7 @@ async function signOn(portIndex, { url, method = 'POST', body = '', headers, dev
             elapsedMs: Date.now() - started,
             lengths,
             deviceIdMasked: maskDeviceId(payload.device_id || deviceId),
+            deviceIdRaw: String(payload.device_id || deviceId || ''),
             headers: signed,
         }
     } catch (error) {
@@ -369,9 +377,12 @@ async function main() {
         ...buildTrackV2Request({ trackId: trackId || '0', deviceId: device.deviceId, iid: device.iid, fp: device.fp }),
         deviceId: device.deviceId,
     }
+    const signedDeviceIds = []
     const signResults = await Promise.allSettled(
         driver.hostPorts.map(async (_, index) => {
             const signed = await signOn(index, plainSpec)
+            // 原值只留在内存里做比对，不进结果（它已被登记为敏感，写盘前还有一道拦截）
+            signedDeviceIds[index] = signed.deviceIdRaw
             return { port: driver.hostPorts[index], elapsedMs: signed.elapsedMs, lengths: signed.lengths, deviceIdMasked: signed.deviceIdMasked }
         }),
     )
@@ -398,13 +409,21 @@ async function main() {
     for (let index = 0; index < driver.hostPorts.length; index += 1) healthMasks.push((await driver.healthz(index))?.deviceId || '')
     const expectedMask = maskDeviceId(device.deviceId)
     const unreadable = healthMasks.filter(mask => !mask).length
-    const identityConsistent = unreadable === 0 && healthMasks.every(mask => mask === expectedMask)
+    const masksOk = unreadable === 0 && healthMasks.every(mask => mask === expectedMask)
+    // 只看脱敏值的前 3 后 3 位太弱：两份身份首尾撞上就会误判 PASS，所以再拿签名回包里的
+    // 原值比一次（比完只留布尔，原值既不打印也不落盘）
+    const signedSeen = signedDeviceIds.filter(id => id)
+    const signComparable = signedSeen.length === driver.hostPorts.length
+    const signMatch = signedSeen.every(id => id === device.deviceId)
+    const identityConsistent = masksOk && (!signComparable || signMatch)
     report.criteria.identity = {
         status: identityConsistent ? 'PASS' : unreadable ? 'BLOCKED' : 'FAIL',
         expected: expectedMask,
         perProcess: driver.hostPorts.map((port, index) => ({ port, deviceId: healthMasks[index] })),
+        maskedValuesMatch: masksOk,
+        signResponseRawMatch: signComparable ? signMatch : 'unknown（有端口没签成功）',
         note: identityConsistent
-            ? '两个进程读到的身份一致'
+            ? '两个进程签出的设备号与身份文件逐字节相同，/healthz 的脱敏值也一致'
             : unreadable
               ? `${unreadable} 个进程的 /healthz 读不到脱敏设备号，无法比对——这不等于身份分裂`
               : '两个进程身份不一致：device_id 分裂属 #2 的范围；本验证在起进程前已落盘身份，正常不该出现',
@@ -420,6 +439,8 @@ async function main() {
         say('[verify] 判据 2：两边各自签的头各打一次上游')
         const upstreamResults = await Promise.allSettled(driver.hostPorts.map((_, index) => upstreamWithSignature(index, device)))
         const rows = []
+        // 判据 2 的两边是并发签的，一起失败就是形态三的证据；写死 1 会让这条永远判不出来
+        const simultaneous = upstreamResults.filter(item => item.status === 'rejected').length
         for (const [index, item] of upstreamResults.entries()) {
             if (item.status === 'rejected') {
                 const error = item.reason
@@ -427,7 +448,7 @@ async function main() {
                 const shape = await classifyUnavailable(index, {
                     hung: isHang(error),
                     served: Boolean(error?.served),
-                    simultaneousFailures: 1,
+                    simultaneousFailures: simultaneous,
                     phase: 'upstreamOnce',
                     leg: error?.leg || 'sign',
                 })
@@ -521,7 +542,8 @@ async function main() {
     const victimIndex = driver.hostPorts.length - 1
     const survivorIndex = 0
     say(`[verify] 判据 4：杀掉端口 ${driver.hostPorts[victimIndex]} 的进程，${driver.hostPorts[survivorIndex]} 应照常签名`)
-    await driver.killProcess(victimIndex)
+    const killMode = await driver.killProcess(victimIndex)
+    report.observations.victimKillMode = killMode ?? null
     await sleep(3000)
     report.observations.processesAfterKill = await driver.processSnapshot()
     // 「被杀的进程真的没了」要两件事同时成立：pid 不在了，而且它的端口不再应答。
@@ -583,7 +605,7 @@ async function main() {
     let scannedBytes = 0
     for (let index = 0; index < driver.hostPorts.length; index += 1) {
         const text = await driver.readLogText(index)
-        scannedBytes += text.length
+        scannedBytes += Buffer.byteLength(text)
         for (const kind of redactor.find(text)) leakedKinds.add(kind)
     }
     // 没跑过带 cookie 的判据时，「日志里没有 cookie」这条并没有被真正检验过，不能算 PASS
@@ -636,7 +658,13 @@ try {
     report.verdict = 'NOT_RUN'
     process.exitCode = 3
 } finally {
-    await driver?.teardown?.()
+    // 清理抛异常不能把结论一起吞掉：结果文件、退出码都要照常走完
+    try {
+        await driver?.teardown?.()
+    } catch (error) {
+        const detail = redactor.sanitize('teardown', String(error?.message || error))
+        process.stdout.write(`[verify] 控制面清理失败（不影响结论）：${detail}\n`)
+    }
     report.finishedAt = new Date().toISOString()
     // 先算 redaction 再序列化，否则写进文件的那份永远是空计数
     report.redaction = { forbidden: redactor.kinds(), leaks: redactor.leaks.length }

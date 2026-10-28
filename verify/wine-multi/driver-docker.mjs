@@ -118,7 +118,7 @@ export function createDockerDriver({ container, containerPorts, hostPorts }) {
 
         async stderrOf(index) {
             const text = await inContainer(`cat ${errFile(index)} 2>/dev/null || true`)
-            return { bytes: text.length, tail: tailLines(text) }
+            return { bytes: Buffer.byteLength(text), tail: tailLines(text) }
         },
 
         /** true = 进程在；false = 确认不在；null = 读不到 pid 文件，无法判断。 */
@@ -129,10 +129,18 @@ export function createDockerDriver({ container, containerPorts, hostPorts }) {
             return out.trim() === 'alive'
         },
 
+        /** 返回实际生效的杀法：'term' 或 'kill'（Wine 包装进程可能不转发 TERM）。 */
         async killProcess(index) {
             const pid = await readPid(index)
             if (pid === null) throw new Error(`读不到端口 ${servePorts[index]} 对应进程的 pid 文件（${pidFile(index)}）`)
             await inContainer(`kill ${pid} 2>/dev/null || true`)
+            for (let waited = 0; waited < 6000; waited += 1000) {
+                await new Promise(resolve => setTimeout(resolve, 1000))
+                if ((await inContainer(`kill -0 ${pid} 2>/dev/null && echo alive || echo gone`)).trim() !== 'alive') return 'term'
+            }
+            // 把「杀不掉」与「杀掉之后另一个不服务」分开：先升级到 KILL 再交给判据 4 观察
+            await inContainer(`kill -9 ${pid} 2>/dev/null || true`)
+            return 'kill'
         },
 
         async readIdentityFile() {
