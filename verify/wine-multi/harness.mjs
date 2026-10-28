@@ -74,9 +74,12 @@ if (mode === 'mock' && !SCENARIOS.includes(scenario)) {
     process.exit(3)
 }
 
+// 彩排一律用随机哨兵串当 cookie：宿主环境里恰好导出着真实凭据时（能跑真环境的人常常如此），
+// 让它进假上游与子进程环境，就不再是「不需要凭据的彩排」了
 const cookie =
-    String(process.env.LIBMSSDK_COOKIE || '').trim() ||
-    (mode === 'mock' ? `verify-mock-cookie-${crypto.randomBytes(12).toString('hex')}` : '')
+    mode === 'mock'
+        ? `verify-mock-cookie-${crypto.randomBytes(12).toString('hex')}`
+        : String(process.env.LIBMSSDK_COOKIE || '').trim()
 const trackId = String(args.track || process.env.LIBMSSDK_VERIFY_TRACK_ID || (mode === 'mock' ? '1000000000000000001' : '')).trim()
 // 数字参数必须先校验：--rounds 0 会让判据 3 一次都不打然后报 PASS，
 // --ready-timeout-ms 非法会让探活循环直接跳过，把「什么都没观察到」报成形态三
@@ -676,7 +679,9 @@ function printConclusion() {
     const failing = rows.filter(([, status]) => status === 'FAIL')
     const skipped = rows.filter(([, status]) => ['SKIPPED', 'BLOCKED', 'NOT_RUN', 'PARTIAL'].includes(status))
     const shapeCounts = Object.entries(report.tally.shapes).filter(([, count]) => count > 0)
-    report.verdict = failing.length ? 'FAIL' : skipped.length ? 'INCOMPLETE' : 'PASS'
+    // 只要记过一条失败，整体结论就不能是「通过」——哪怕它落在的那条判据本身 PASS
+    // （判据 4 只管服务连续性，存活方的上游被拒照样记进形态二，那件事必须反映到结论上）
+    report.verdict = failing.length || report.failures.length ? 'FAIL' : skipped.length ? 'INCOMPLETE' : 'PASS'
 
     say('[verify] ============ 结论 ============')
     for (const [label, status] of rows) say(`[verify] ${label}：${status}`)

@@ -27,22 +27,26 @@ export async function fetchHealthz(port, probeTimeoutMs = 4000) {
     }
 }
 
-/** 返回仍未就绪的进程：seenKinds 记整个等待期间看到过的形态，只留最后一个会吹成「从头到尾如此」。 */
+/** 返回仍未就绪的进程：seenKinds 只记真的观察到过的形态，lastErrorKind 是最后一次的结果。
+ *  用 Set 的插入顺序当「最后一次」是错的：refused→hung→refused 会让 at(-1) 回 hung。 */
 export async function waitForReady(ports, { timeoutMs, intervalMs, probeTimeoutMs }) {
     const deadline = Date.now() + timeoutMs
-    const pending = new Map(ports.map((_, index) => [index, new Set(['refused'])]))
+    const pending = new Map(ports.map((_, index) => [index, { seen: new Set(), last: 'refused' }]))
     while (pending.size && Date.now() < deadline) {
-        for (const [index, kinds] of pending) {
+        for (const [index, state] of pending) {
             const kind = await probeHealthz(ports[index], probeTimeoutMs)
             if (kind === 'ready') pending.delete(index)
-            else kinds.add(kind)
+            else {
+                state.seen.add(kind)
+                state.last = kind
+            }
         }
         if (pending.size) await new Promise(resolve => setTimeout(resolve, intervalMs))
     }
-    return [...pending.entries()].map(([index, kinds]) => ({
+    return [...pending.entries()].map(([index, state]) => ({
         index,
-        lastErrorKind: [...kinds].at(-1),
-        seenKinds: [...kinds],
+        lastErrorKind: state.last,
+        seenKinds: state.seen.size ? [...state.seen] : [state.last],
     }))
 }
 

@@ -71,6 +71,8 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
             cwd: PROJECT_ROOT,
             env: {
                 ...process.env,
+                // 子进程也只拿得到哨兵串，宿主环境里的真实凭据不该进彩排
+                LIBMSSDK_COOKIE: cookie,
                 LIBMSSDK_BIND: '127.0.0.1',
                 LIBMSSDK_PORT: String(bindPort),
                 LIBMSSDK_STATE_DIR: stateDir,
