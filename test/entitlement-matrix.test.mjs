@@ -138,6 +138,11 @@ test('读数只留判定用的标量，绝不外泄播放地址、签名与 cook
     assert.ok(!text.includes('SECRET-COOKIE-VALUE'), 'cookie 值不得出现在读数里')
     assert.ok(!text.includes('SECRET-URL-TOKEN'), '播放地址不得出现在读数里')
     assert.ok(!text.includes('url_player_info'), 'url 字段本身也不该被带出来')
+    assert.deepEqual(
+        Object.keys(extractScalars(JSON.stringify({ message: '登录提示里可能夹着地址', status_code: 0 }))),
+        ['status_code'],
+        '字符串型字段一律不收：文案 / 地址 / 标识都可能夹凭据',
+    )
 })
 
 test('空回包与坏 JSON 都能给出可读判定', () => {

@@ -81,7 +81,13 @@ export function encodeSortedParams(params) {
         .join('&')
 }
 
-/** 公共查询参数；顺序与取值都照抄客户端，只有 identity / app 两处按 arm 替换。 */
+/**
+ * 公共查询参数；顺序与取值都照抄客户端，只有 identity / app 两处按 arm 替换。
+ *
+ * 这份构造与 `src/probe.mjs` 的 `buildTrackV2Request` **故意不合并**：那边是本服务对外
+ * 的形状（插桩序、带 x-tt-trace-id），这边要逐字节复刻调用方客户端的形状（字典序、
+ * 空格转 `+`）。两者各自被自己的测试守着，合成一份就同时丢掉两个被测对象。
+ */
 export function buildPcTrackV2Request({ trackId, identity, app, localUser = '1', cookie = '' }) {
     const params = {
         ac: 'wifi',
@@ -155,7 +161,10 @@ export const ARMS = [
     },
     {
         name: 'probe-shape',
-        expect: '预期试听：现状 `node src/index.mjs probe` 的完整形状',
+        // 只复刻 `probe` 的身份 / 版本号 / local-user。src/probe.mjs 还额外发
+        // x-tt-trace-id 与 accept-encoding，那两个头本条没复刻，
+        // 所以这一行不能替 shipped probe 的完整请求背书（调查报告第七节记了这条）。
+        expect: '待定：`probe` 用的那份身份 + 3.8.0 + local-user=0（不含它另外两个头）',
         changes: '身份=服务落盘 16 位 · 客户端 3.8.0 · local-user=0',
         touches: [
             'query.device_id',
@@ -198,14 +207,14 @@ export const ARMS = [
     },
     {
         name: 'sig-mismatch',
-        expect: '预期空 body（签名失效对照：证明非空回包=签名被接受）',
+        expect: '待定：让 URL 设备号与签名器设备号不一致，看上游认不认得出来',
         changes: '请求形状与基线逐字节相同，只是用另一个 16 位设备号签名',
         touches: [],
         request: { identity: 'ts', app: APP_PROFILES.luna330, localUser: '1', useCookie: true, signWith: 'other16' },
     },
     {
         name: 'no-sign',
-        expect: '预期空 body（无签名对照：证明前一条不是"根本不需要签名"）',
+        expect: '预期空 body（必要性对照：没有签名还剩什么）',
         changes: '请求形状与基线逐字节相同，只是不带 x-helios / x-medusa',
         touches: [],
         request: { identity: 'ts', app: APP_PROFILES.luna330, localUser: '1', useCookie: true, skipSign: true },
@@ -219,7 +228,10 @@ export const ARMS = [
     },
 ]
 
-/** 只保留判定需要的标量，且永不输出 URL、token、cookie、设备号。 */
+/**
+ * 只保留判定用的标量。字符串一律不收（`status_msg` 这类里可能夹着地址、标识或提示文案），
+ * 数字与布尔按键名白名单收；键名命中黑名单的直接跳过。
+ */
 export function extractScalars(rawBody) {
     let payload
     try {
@@ -232,14 +244,12 @@ export function extractScalars(rawBody) {
         if (!node || typeof node !== 'object' || trail.length > 4) return
         for (const [key, value] of Object.entries(node)) {
             const pathText = `${trail.join('.')}${trail.length ? '.' : ''}${key}`
-            if (/url|token|sign|helios|medusa|cookie|auth|secret/i.test(key)) continue
-            if (typeof value === 'number' || typeof value === 'string' || typeof value === 'boolean') {
-                if (/status_code|error|message|code|duration|is_vip|vip|preview|tier|level/i.test(key)) {
-                    picked[pathText] = typeof value === 'string' && value.length > 48 ? `${value.slice(0, 48)}…` : value
-                }
+            if (/url|token|sign|helios|medusa|cookie|auth|secret|id$/i.test(key)) continue
+            if (typeof value === 'number' || typeof value === 'boolean') {
+                if (/status_code|error|duration|is_vip|vip|preview|tier|level/i.test(key)) picked[pathText] = value
                 continue
             }
-            walk(value, [...trail, key])
+            if (typeof value === 'object' && value !== null) walk(value, [...trail, key])
         }
     }
     walk(payload, [])
@@ -355,20 +365,27 @@ async function main() {
     }
     const arms = only ? ARMS.filter(item => item.name === only) : ARMS
     if (!arms.length) throw new Error(`未知 arm：${only}（可选：${ARMS.map(item => item.name).join(' / ')}）`)
-    // 跑整份矩阵时没有 --device 就跳过 captured，而不是让它在中间炸掉；
-    // 明确 --arm captured 时则让它按 buildIdentity 的报错说话。
-    const skipCaptured = !only && !argValue('device')
-    const runnable = skipCaptured ? arms.filter(item => item.name !== 'captured') : arms
-    if (skipCaptured) process.stderr.write('跳过 captured：这条需要 --device <抓包 device_id>（其余 arm 照跑）\n')
+    // 先把参数验完，再碰任何凭据与网络：缺 --device 时要么跳过 captured（跑整份矩阵），
+    // 要么直接报错（明确点名了它），不存在「跑到一半才炸」那条路径。
+    const wantsCaptured = arms.some(item => item.name === 'captured')
+    const missingDevice = wantsCaptured && !argValue('device')
+    if (missingDevice && only) throw new Error('captured 需要 --device <抓包 device_id>（可再给 --iid / --fp）')
+    const runnable = missingDevice && !only ? arms.filter(item => item.name !== 'captured') : arms
+    if (missingDevice && !only) process.stderr.write('跳过 captured：这条需要 --device <抓包 device_id>（其余 arm 照跑）\n')
+    if (argValue('device') && !argValue('iid')) {
+        process.stderr.write('注意：captured 没给 --iid / --fp，会拿 device_id 顶上——那不是一份完整的抓包身份\n')
+    }
     if (!trackId) throw new Error('需要 --track <track_id>（或 --list）')
 
     const config = loadConfig()
+    const explicitSource = argValue('cookie-from')
     let cookie = ''
     try {
         cookie = readCookie(cookieSource)
-    } catch (error) {
-        if (argValue('cookie-from')) throw error
-        process.stderr.write(`没读到 cookie（${String(error?.message || error).split('\n')[0]}）\n`)
+    } catch {
+        // 不打印底层错误：ENOENT 原文里带着本机绝对路径和用户名。
+        if (explicitSource) throw new Error('--cookie-from 指定的文件读不到（路径不打印，避免写进日志）')
+        process.stderr.write('没读到 cookie（默认源：环境变量 LIBMSSDK_COOKIE 或本机播放器配置）\n')
     }
     if (!cookie) process.stderr.write('警告：带 Cookie 的 arm 会退化成匿名\n')
     const signer = new BdmsSigner({ modulePath: config.bdmsModule, deviceId: config.deviceId })
