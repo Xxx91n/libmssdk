@@ -75,6 +75,8 @@ export function failureResponse(kind, { message, details, retryAtMs, nowMs } = {
     const { status, code, retryAfterSeconds } = classify(kind, { retryAtMs, nowMs })
     const headers = {}
     const body = { ...details, ok: false, error: message, code }
+    // 扩展字段不许夹带等待时长：头和体只由这一次分类说了算，否则「其余不带」会被绕过。
+    delete body.retry_after_seconds
     if (retryAfterSeconds !== null) {
         headers['Retry-After'] = String(retryAfterSeconds)
         body.retry_after_seconds = retryAfterSeconds

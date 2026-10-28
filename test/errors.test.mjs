@@ -101,10 +101,27 @@ test('等待时长同时出现在响应头和响应体，且是同一个整数',
 
 test('不带等待时长的情况，响应头和响应体都没有它', () => {
     for (const kind of [ERROR_KINDS.INVALID_REQUEST, ERROR_KINDS.UNAUTHORIZED, ERROR_KINDS.SIGNER_UNAVAILABLE, '未知']) {
-        const { headers, body } = failureResponse(kind, { message: '不行', retryAtMs: NOW + 30_000, nowMs: NOW })
+        const { headers, body } = failureResponse(kind, {
+            message: '不行',
+            details: { field: 'url', retry_after_seconds: 99 },
+            retryAtMs: NOW + 30_000,
+            nowMs: NOW,
+        })
         assert.ok(!('Retry-After' in headers), `${kind} 不该有 Retry-After`)
-        assert.ok(!('retry_after_seconds' in body), `${kind} 不该有 retry_after_seconds`)
+        assert.ok(!('retry_after_seconds' in body), `${kind} 不该被扩展字段夹带等待时长`)
+        assert.equal(body.field, 'url', `${kind} 的其余扩展字段照旧`)
     }
+})
+
+test('扩展字段夹带等待时长时，以这一次分类为准', () => {
+    const { headers, body } = failureResponse(ERROR_KINDS.RATE_LIMITED, {
+        message: '打太快了',
+        details: { retry_after_seconds: 99 },
+        retryAtMs: NOW + 2000,
+        nowMs: NOW,
+    })
+    assert.equal(body.retry_after_seconds, 2)
+    assert.equal(headers['Retry-After'], '2')
 })
 
 test('未知原因的默认落点是内部错误：500、不带时长、不冒充可重试', () => {
