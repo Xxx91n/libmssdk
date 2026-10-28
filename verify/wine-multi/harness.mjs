@@ -81,10 +81,10 @@ const trackId = String(args.track || process.env.LIBMSSDK_VERIFY_TRACK_ID || (mo
 // 数字参数必须先校验：--rounds 0 会让判据 3 一次都不打然后报 PASS，
 // --ready-timeout-ms 非法会让探活循环直接跳过，把「什么都没观察到」报成形态三
 const positiveInt = (label, value, fallback) => {
-    if (value === undefined || value === '') return fallback
+    if (value === undefined) return fallback
     const parsed = Number(value)
     if (!Number.isInteger(parsed) || parsed < 1) {
-        console.log(`[verify] ${label} 需要正整数，收到：${value}`)
+        console.log(`[verify] ${label} 需要正整数，收到：${JSON.stringify(value)}`)
         process.exit(3)
     }
     return parsed
@@ -255,7 +255,6 @@ async function signOn(portIndex, { url, method = 'POST', body = '', headers, dev
             elapsedMs: Date.now() - started,
             lengths,
             deviceIdMasked: maskDeviceId(payload.device_id || deviceId),
-            deviceIdRaw: String(payload.device_id || deviceId || ''),
             headers: signed,
         }
     } catch (error) {
@@ -305,7 +304,7 @@ async function upstreamWithSignature(portIndex, device) {
         sign: signed,
         upstream: {
             http: response.status,
-            bodyBytes: summary.bodyBytes || text.length,
+            bodyBytes: Buffer.byteLength(text),
             accepted,
             fullTrack: Boolean(summary.fullTrack),
             durations: { track: summary.trackDurationSeconds || 0, stream: summary.streamDurationSeconds || 0 },
@@ -377,12 +376,9 @@ async function main() {
         ...buildTrackV2Request({ trackId: trackId || '0', deviceId: device.deviceId, iid: device.iid, fp: device.fp }),
         deviceId: device.deviceId,
     }
-    const signedDeviceIds = []
     const signResults = await Promise.allSettled(
         driver.hostPorts.map(async (_, index) => {
             const signed = await signOn(index, plainSpec)
-            // 原值只留在内存里做比对，不进结果（它已被登记为敏感，写盘前还有一道拦截）
-            signedDeviceIds[index] = signed.deviceIdRaw
             return { port: driver.hostPorts[index], elapsedMs: signed.elapsedMs, lengths: signed.lengths, deviceIdMasked: signed.deviceIdMasked }
         }),
     )
@@ -405,30 +401,33 @@ async function main() {
     say(`[verify] 判据 1 ${report.criteria.bothSign.status}：${signResults.length - signFailures.length}/${signResults.length} 出签名`)
 
     // ——— 判据 5：两个进程读到同一份身份 ———
+    // 每个进程各问一次它自己的身份视图（/config 给的是该进程 resolveIdentity() 的结果，
+    // 原值只在内存比对），/healthz 的脱敏值作为第二道印证。
+    // 拿 /sign 的回包比是循环论证：那回的是我们发过去的 id，身份分裂也照样"一致"。
     const healthMasks = []
-    for (let index = 0; index < driver.hostPorts.length; index += 1) healthMasks.push((await driver.healthz(index))?.deviceId || '')
-    const expectedMask = maskDeviceId(device.deviceId)
-    const unreadable = healthMasks.filter(mask => !mask).length
-    const masksOk = unreadable === 0 && healthMasks.every(mask => mask === expectedMask)
-    // 只看脱敏值的前 3 后 3 位太弱：两份身份首尾撞上就会误判 PASS，所以再拿签名回包里的
-    // 原值比一次（比完只留布尔，原值既不打印也不落盘）
-    const signedSeen = signedDeviceIds.filter(id => id)
-    const signComparable = signedSeen.length === driver.hostPorts.length
-    const signMatch = signedSeen.every(id => id === device.deviceId)
-    const identityConsistent = masksOk && (!signComparable || signMatch)
-    report.criteria.identity = {
-        status: identityConsistent ? 'PASS' : unreadable ? 'BLOCKED' : 'FAIL',
-        expected: expectedMask,
-        perProcess: driver.hostPorts.map((port, index) => ({ port, deviceId: healthMasks[index] })),
-        maskedValuesMatch: masksOk,
-        signResponseRawMatch: signComparable ? signMatch : 'unknown（有端口没签成功）',
-        note: identityConsistent
-            ? '两个进程签出的设备号与身份文件逐字节相同，/healthz 的脱敏值也一致'
-            : unreadable
-              ? `${unreadable} 个进程的 /healthz 读不到脱敏设备号，无法比对——这不等于身份分裂`
-              : '两个进程身份不一致：device_id 分裂属 #2 的范围；本验证在起进程前已落盘身份，正常不该出现',
+    const processDeviceIds = []
+    for (let index = 0; index < driver.hostPorts.length; index += 1) {
+        healthMasks.push((await driver.healthz(index))?.deviceId || '')
+        const raw = await driver.configIdentity(index)
+        if (raw) redactor.forbid(raw, 'device_id')
+        processDeviceIds.push(raw || '')
     }
-    if (!identityConsistent) recordFailure('identity', null, 'unclassified', report.criteria.identity.note)
+    const expectedMask = maskDeviceId(device.deviceId)
+    const masksOk = healthMasks.every(mask => mask && mask === expectedMask)
+    const rawComparable = processDeviceIds.every(id => id)
+    const rawMatch = rawComparable && processDeviceIds.every(id => id === device.deviceId)
+    report.criteria.identity = {
+        status: rawComparable ? rawMatch && masksOk ? 'PASS' : 'FAIL' : masksOk ? 'PARTIAL' : 'BLOCKED',
+        expected: expectedMask,
+        perProcess: driver.hostPorts.map((port, index) => ({ port, masked: healthMasks[index], rawMatchesFile: processDeviceIds[index] ? processDeviceIds[index] === device.deviceId : null })),
+        maskedValuesMatch: masksOk,
+        note: rawComparable
+            ? rawMatch
+                ? `两个进程各自解析出的设备号与共享身份文件逐字节相同，/healthz 脱敏值也一致`
+                : '两个进程身份不一致（原值比对）：device_id 分裂属 #2 的范围；本验证在起进程前已落盘身份，正常不该出现'
+            : '有进程的 /config 读不到原值，只能比脱敏的前 3 后 3 位——不足以证明同一份身份，记 PARTIAL',
+    }
+    if (report.criteria.identity.status !== 'PASS') recordFailure('identity', null, 'unclassified', report.criteria.identity.note)
 
     // ——— 判据 2：各自签的头各打一次真实上游 ———
     const hasUpstream = Boolean(cookie && trackId)
@@ -439,8 +438,9 @@ async function main() {
         say('[verify] 判据 2：两边各自签的头各打一次上游')
         const upstreamResults = await Promise.allSettled(driver.hostPorts.map((_, index) => upstreamWithSignature(index, device)))
         const rows = []
-        // 判据 2 的两边是并发签的，一起失败就是形态三的证据；写死 1 会让这条永远判不出来
-        const simultaneous = upstreamResults.filter(item => item.status === 'rejected').length
+        // 判据 2 的两边是并发签的，一起失败就是形态三的证据；写死 1 会让这条永远判不出来。
+        // 只数签名腿：上游腿一起失败是网络问题，不该冒充「共享 prefix 被拖垮」
+        const simultaneous = upstreamResults.filter(item => item.status === 'rejected' && item.reason?.leg !== 'upstream').length
         for (const [index, item] of upstreamResults.entries()) {
             if (item.status === 'rejected') {
                 const error = item.reason
@@ -542,8 +542,14 @@ async function main() {
     const victimIndex = driver.hostPorts.length - 1
     const survivorIndex = 0
     say(`[verify] 判据 4：杀掉端口 ${driver.hostPorts[victimIndex]} 的进程，${driver.hostPorts[survivorIndex]} 应照常签名`)
-    const killMode = await driver.killProcess(victimIndex)
-    report.observations.victimKillMode = killMode ?? null
+    let killMode = null
+    try {
+        killMode = await driver.killProcess(victimIndex)
+    } catch (error) {
+        // 杀不动是控制面的问题，不该把前面几条判据的结论一起抹掉
+        recordFailure('survivor', victimIndex, 'unclassified', `杀进程失败：${String(error?.message || error)}`)
+    }
+    report.observations.victimKillMode = killMode
     await sleep(3000)
     report.observations.processesAfterKill = await driver.processSnapshot()
     // 「被杀的进程真的没了」要两件事同时成立：pid 不在了，而且它的端口不再应答。
@@ -673,14 +679,16 @@ try {
         const kinds = [...new Set(redactor.leaks.map(item => item.kind))].join(', ')
         process.stdout.write(`[verify] 脱敏失败：输出里出现过敏感值（${kinds}），结果不写盘。\n`)
         process.exitCode = 1
-    } else if (!report.verdict) {
-        process.stdout.write('[verify] 未产出结论（提前异常退出），结果不写盘。\n')
-        process.exitCode = 2
     } else {
-        fs.mkdirSync(outDir, { recursive: true })
-        const file = path.join(outDir, `verify-${mode}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`)
-        fs.writeFileSync(file, serialized)
-        say(`[verify] 结果写入 ${file}`)
+        try {
+            fs.mkdirSync(outDir, { recursive: true })
+            const file = path.join(outDir, `verify-${mode}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`)
+            fs.writeFileSync(file, serialized)
+            say(`[verify] 结果写入 ${file}`)
+        } catch (error) {
+            process.stdout.write(`[verify] 结果写盘失败：${redactor.sanitize('write', String(error?.message || error))}\n`)
+            process.exitCode = 1
+        }
         if (report.verdict === 'FAIL') process.exitCode = 1
         if (report.verdict === 'INCOMPLETE') process.exitCode = 2
     }

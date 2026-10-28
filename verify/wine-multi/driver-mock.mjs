@@ -184,6 +184,18 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
             return probeHealthz(ports[index])
         },
 
+        /** 每个进程自己的身份视图（原值，只在内存比对，不落盘） */
+        async configIdentity(index) {
+            try {
+                const response = await fetch(`http://127.0.0.1:${ports[index]}/config`, { signal: AbortSignal.timeout(5000) })
+                if (!response.ok) return null
+                const payload = await response.json()
+                return payload?.identity?.device_id || null
+            } catch {
+                return null
+            }
+        },
+
         async waitForReady(timeoutMs) {
             return waitForReady(ports, { timeoutMs, intervalMs: 500, probeTimeoutMs: 3000 })
         },
@@ -228,11 +240,17 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
 
         async killProcess(index) {
             const entry = entryFor(index)
-            if (!entry || isDead(entry)) return
+            if (!entry || isDead(entry)) return 'already-dead'
+            let mode = 'term'
             try {
                 entry.child.kill('SIGTERM')
             } catch {
-                entry.child.kill('SIGKILL')
+                mode = 'kill'
+                try {
+                    entry.child.kill('SIGKILL')
+                } catch {
+                    /* 已经没了 */
+                }
             }
             // 注入「一个进程倒下把共享 prefix 拖垮」：Wine 下的可观察形态是同 prefix 的
             // 进程一起卡住（pid 还在、不应答、stderr 安静），这里用 SIGSTOP 复现。
@@ -247,7 +265,7 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
                     }
                 }
             }
-            return 'term'
+            return mode
         },
 
         async readIdentityFile() {
@@ -274,7 +292,12 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
             }
             upstreamServer?.closeAllConnections?.()
             upstreamServer?.close()
-            fs.rmSync(tmpDir, { recursive: true, force: true })
+            try {
+                // Windows 上刚 SIGKILL 的子进程可能还锁着文件，给它几次重试的余地
+                fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+            } catch {
+                throw new Error(`彩排的临时目录没清掉，需要手工清理系统临时目录下的 libmssdk-verify-*（里面有明文身份文件）`)
+            }
         },
     }
 }

@@ -108,6 +108,21 @@ export function createDockerDriver({ container, containerPorts, hostPorts }) {
             return probeHealthz(publicPorts[index])
         },
 
+        /**
+         * 这个进程自己 resolveIdentity() 出来的设备号（原值，只在内存里比对）。
+         * 不能拿 /sign 的回包做这个比对——那回的是我们发过去的那个 id，永远同一个。
+         */
+        async configIdentity(index) {
+            try {
+                const response = await fetch(`http://127.0.0.1:${publicPorts[index]}/config`, { signal: AbortSignal.timeout(5000) })
+                if (!response.ok) return null
+                const payload = await response.json()
+                return payload?.identity?.device_id || null
+            } catch {
+                return null
+            }
+        },
+
         async waitForReady(timeoutMs) {
             return waitForReady(publicPorts, { timeoutMs, intervalMs: 2000, probeTimeoutMs: 4000 })
         },
