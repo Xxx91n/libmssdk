@@ -159,15 +159,19 @@ function recordFailure(phase, portIndex, shape, detail) {
     say(`[verify]   失败：端口 ${driver.hostPorts[portIndex]} — ${SHAPES[shape]}（${safe}）`)
 }
 
-/** 把一次「签不出 / 打不通」归到三种形态之一。leg=upstream 表示请求本身没打出去，不能算进程问题。 */
-async function classifyUnavailable(portIndex, { hung, simultaneousFailures, phase, leg = 'sign' }) {
+/**
+ * 把一次「签不出 / 打不通」归到三种形态之一。
+ * leg=upstream 表示请求本身没打出去，不能算进程问题；served 表示进程在答话、只是这单失败。
+ */
+async function classifyUnavailable(portIndex, { hung, served, simultaneousFailures, phase, leg = 'sign', stderrBytes = 0 }) {
     if (leg === 'upstream') return 'unclassified'
     const alive = await driver.pidAlive(portIndex)
     if (alive === null) return 'unclassified'
     if (alive === false) return 'processStart'
-    if (phase === 'survivor') return 'prefixContention'
+    if (phase === 'survivor') return hung && stderrBytes === 0 ? 'prefixContention' : 'unclassified'
     if (simultaneousFailures >= 2) return 'prefixContention'
-    return hung ? 'unclassified' : 'processStart'
+    if (hung || served) return 'unclassified'
+    return 'processStart'
 }
 
 function tagLeg(error, leg) {
@@ -187,14 +191,25 @@ async function signOn(portIndex, { url, method = 'POST', body = '', headers, dev
             signal: AbortSignal.timeout(signTimeoutMs),
         })
         const text = await response.text()
-        if (response.status !== 200) throw new Error(`/sign HTTP ${response.status}: ${text.slice(0, 160)}`)
+        if (response.status !== 200) {
+            const error = new Error(`/sign HTTP ${response.status}: ${text.slice(0, 160)}`)
+            error.served = true
+            throw error
+        }
         const payload = JSON.parse(text)
         const signed = payload.headers || {}
         for (const value of Object.values(signed)) redactor.forbid(value, 'signature')
         redactor.forbid(payload.device_id, 'device_id')
+        const lengths = { helios: String(signed['X-Helios'] || '').length, medusa: String(signed['X-Medusa'] || '').length }
+        // 「两个进程都出签名」要真的验到两个头，回包空也算失败
+        if (!lengths.helios || !lengths.medusa) {
+            const error = new Error(`/sign 回包缺 X-Helios 或 X-Medusa（拿到 ${Object.keys(signed).length} 个头）`)
+            error.served = true
+            throw error
+        }
         return {
             elapsedMs: Date.now() - started,
-            lengths: { helios: String(signed['X-Helios'] || '').length, medusa: String(signed['X-Medusa'] || '').length },
+            lengths,
             deviceIdMasked: maskDeviceId(payload.device_id || deviceId),
             headers: signed,
         }
@@ -238,13 +253,15 @@ async function upstreamWithSignature(portIndex, device) {
         throw tagLeg(error, 'upstream')
     }
     const summary = summarizeTrackV2Response(text, trackId)
-    if (!summary.accepted) report.tally.upstreamFailures += 1
+    // 「上游接受」= 200 且回包能解析成曲目；4xx/5xx 即使带 JSON 也不算接受
+    const accepted = response.status === 200 && Boolean(summary.accepted)
+    if (!accepted) report.tally.upstreamFailures += 1
     return {
         sign: signed,
         upstream: {
             http: response.status,
             bodyBytes: summary.bodyBytes || text.length,
-            accepted: Boolean(summary.accepted),
+            accepted,
             fullTrack: Boolean(summary.fullTrack),
             durations: { track: summary.trackDurationSeconds || 0, stream: summary.streamDurationSeconds || 0 },
         },
@@ -283,7 +300,12 @@ async function main() {
     if (notReady.length) {
         for (const entry of notReady) {
             const stderr = await driver.stderrOf(entry.index)
-            const shape = await classifyUnavailable(entry.index, { hung: entry.lastErrorKind === 'timeout', simultaneousFailures: notReady.length, phase: 'ready' })
+            const shape = await classifyUnavailable(entry.index, {
+                hung: entry.lastErrorKind === 'hung',
+                served: entry.lastErrorKind === 'http',
+                simultaneousFailures: notReady.length,
+                phase: 'ready',
+            })
             recordFailure('ready', entry.index, shape, `就绪超时（${entry.lastErrorKind}）；stderr ${stderr.bytes} 字节`)
         }
         report.criteria.bothSign = { status: 'FAIL', reason: '不是所有进程都就绪', portsNotReady: notReady.map(entry => driver.hostPorts[entry.index]) }
@@ -313,8 +335,13 @@ async function main() {
     const signFailures = signResults.map((item, index) => ({ item, index })).filter(entry => entry.item.status === 'rejected')
     for (const { item, index } of signFailures) {
         const detail = String(item.reason?.message || item.reason)
-        const shape = await classifyUnavailable(index, { hung: isHang(item.reason), simultaneousFailures: signFailures.length, phase: 'bothSign' })
-        recordFailure('bothSign', index, shape, detail)
+        const shape = await classifyUnavailable(index, {
+            hung: isHang(item.reason),
+            served: Boolean(item.reason?.served),
+            simultaneousFailures: signFailures.length,
+            phase: 'bothSign',
+        })
+        recordFailure('bothSign', index, shape, `${detail}；该进程 stderr ${(await driver.stderrOf(index)).bytes} 字节`)
     }
     report.criteria.bothSign = {
         status: signFailures.length ? 'FAIL' : 'PASS',
@@ -353,6 +380,7 @@ async function main() {
                 const detail = String(error?.message || error)
                 const shape = await classifyUnavailable(index, {
                     hung: isHang(error),
+                    served: Boolean(error?.served),
                     simultaneousFailures: 1,
                     phase: 'upstreamOnce',
                     leg: error?.leg || 'sign',
@@ -399,8 +427,14 @@ async function main() {
                     tally.upstreamAttempts += 1
                     tally.upstreamFailures += 1
                 }
-                const shape = await classifyUnavailable(index, { hung: isHang(error), simultaneousFailures: failureCount, phase: 'rounds', leg })
-                recordFailure('rounds', index, shape, `第 ${round} 轮：${detail}`)
+                const shape = await classifyUnavailable(index, {
+                    hung: isHang(error),
+                    served: Boolean(error?.served),
+                    simultaneousFailures: failureCount,
+                    phase: 'rounds',
+                    leg,
+                })
+                recordFailure('rounds', index, shape, `第 ${round} 轮：${detail}；该进程 stderr ${(await driver.stderrOf(index)).bytes} 字节`)
                 row[port] = 'failed'
                 continue
             }
@@ -447,22 +481,34 @@ async function main() {
     // 「被杀的进程真的没了」要两件事同时成立：pid 不在了，而且它的端口不再应答。
     // 只查 pid 会把「wine 包装进程死了、node.exe 还占着端口」误判成通过。
     const victimPidState = await driver.pidAlive(victimIndex)
-    const victimAnswering = Boolean(await driver.healthz(victimIndex))
-    const victimGone = victimPidState === false && !victimAnswering
+    const victimPortState = await driver.probePort(victimIndex)
+    // 只查 pid 会把「wine 包装进程死了、node.exe 还占着端口」读成通过；
+    // 端口挂住（hung）也不算干净退出——那正是共享 prefix 出问题需要的证据。
+    const victimGone = victimPidState === false && victimPortState === 'refused'
     let survivor
     try {
         const signed = await signOn(survivorIndex, plainSpec)
         survivor = { ok: true, lengths: signed.lengths, deviceIdMasked: signed.deviceIdMasked }
     } catch (error) {
+        const stderr = await driver.stderrOf(survivorIndex)
         const detail = String(error?.message || error)
-        const shape = await classifyUnavailable(survivorIndex, { hung: isHang(error), simultaneousFailures: 1, phase: 'survivor' })
-        recordFailure('survivor', survivorIndex, shape, detail)
-        survivor = { ok: false, hung: isHang(error) }
+        const shape = await classifyUnavailable(survivorIndex, {
+            hung: isHang(error),
+            served: Boolean(error?.served),
+            simultaneousFailures: 1,
+            phase: 'survivor',
+            leg: error?.leg || 'sign',
+            stderrBytes: stderr.bytes,
+        })
+        recordFailure('survivor', survivorIndex, shape, `${detail}；存活方 stderr ${stderr.bytes} 字节`)
+        survivor = { ok: false, hung: isHang(error), stderrBytes: stderr.bytes, stderrTail: stderr.tail }
     }
     report.observations.victimGone = victimGone
-    report.observations.victimAnswering = victimAnswering
+    report.observations.victimPortState = victimPortState
     if (victimPidState === null) recordFailure('survivor', victimIndex, 'unclassified', '读不到被杀进程的 pid 文件，无法判断它是否还在')
-    else if (victimAnswering) recordFailure('survivor', victimIndex, 'unclassified', '被杀进程仍在应答 /healthz，杀没生效')
+    else if (victimPortState === 'hung') recordFailure('survivor', victimIndex, 'unclassified', '被杀方端口接了但不答话，不是干净退出')
+    else if (victimPortState === 'ready' || victimPortState === 'http')
+        recordFailure('survivor', victimIndex, 'unclassified', '被杀方仍在应答 /healthz，杀没生效')
     else if (victimPidState) recordFailure('survivor', victimIndex, 'unclassified', '被杀进程的 pid 仍存活')
     if (hasUpstream && survivor.ok) {
         try {

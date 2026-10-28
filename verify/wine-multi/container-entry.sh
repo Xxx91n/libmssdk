@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 容器入口：同一个 WINEPREFIX、同一份 identity.json、同一份 bdms.node，起 N 个 serve 进程。
-# 与 deploy/entrypoint.sh 的差别只有两件事：多进程、日志落文件（供宿主侧读）。
+# 与 deploy/entrypoint.sh 的差别：多进程、日志落文件、不做身份前置就没有前置、
+# 去掉 set -e 与 exec（一个 serve 起不来要把证据留下，而不是让容器整体退出）。
 #
 # 进程清单由 run.sh 经 VERIFY_SERVE_PORTS 传入（空格分隔的容器内端口）。
 set -uo pipefail

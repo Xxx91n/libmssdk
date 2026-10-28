@@ -6,7 +6,7 @@
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { fetchHealthz, waitForReady } from './endpoints.mjs'
+import { fetchHealthz, probeHealthz, tailLines, waitForReady } from './endpoints.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -80,7 +80,9 @@ export function createDockerDriver({ container, containerPorts, hostPorts }) {
                 image,
                 container,
                 wineserverCount: Number(wineserver) || 0,
-                sharedWinePrefix: true,
+                // 结构事实（run.sh 只挂了一个 /wine 卷给整个容器），不是测出来的结论；
+                // 实测证据是上面的 wineserverCount
+                winePrefix: '/wine',
                 sharedIdentityFile: IDENTITY_FILE,
                 summary: `镜像 ${image || '?'} / ${wine || 'wine ?'} / Windows Node ${nodeWin || '?'} / 宿主 Node ${process.version} / Docker ${dockerVersion} / wineserver ${Number(wineserver) || 0} 个`,
             }
@@ -98,6 +100,11 @@ export function createDockerDriver({ container, containerPorts, hostPorts }) {
             return fetchHealthz(publicPorts[index])
         },
 
+        /** ready / http / refused / hung —— 判据 4 用它确认被杀方真的不再应答。 */
+        async probePort(index) {
+            return probeHealthz(publicPorts[index])
+        },
+
         async waitForReady(timeoutMs) {
             return waitForReady(publicPorts, { timeoutMs, intervalMs: 2000, probeTimeoutMs: 4000 })
         },
@@ -108,7 +115,7 @@ export function createDockerDriver({ container, containerPorts, hostPorts }) {
 
         async stderrOf(index) {
             const text = await inContainer(`cat ${errFile(index)} 2>/dev/null || true`)
-            return { bytes: text.length, tail: text.split('\n').filter(Boolean).slice(-8) }
+            return { bytes: text.length, tail: tailLines(text) }
         },
 
         /** true = 进程在；false = 确认不在；null = 读不到 pid 文件，无法判断。 */

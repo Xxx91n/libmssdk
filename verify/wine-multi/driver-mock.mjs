@@ -11,7 +11,7 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
-import { fetchHealthz, waitForReady } from './endpoints.mjs'
+import { fetchHealthz, probeHealthz, tailLines, waitForReady } from './endpoints.mjs'
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '..', '..')
 const MOCK_BDMS = path.join(PROJECT_ROOT, 'test', 'fixtures', 'mock-bdms.mjs')
@@ -79,10 +79,7 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
         fs.closeSync(out)
         fs.closeSync(err)
         fs.writeFileSync(logPath('pid', declaredPort), `${child.pid}\n`)
-        const entry = { port: declaredPort, bindPort, pid: child.pid, child }
-        child.on('exit', () => {
-            entry.dead = true
-        })
+        const entry = { port: declaredPort, pid: child.pid, child }
         children.push(entry)
     }
 
@@ -145,7 +142,7 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
                 kind: 'mock',
                 scenario,
                 wine: 'n/a（彩排不经 Wine，也不加载真实 bdms.node）',
-                nodeWin: process.version,
+                nodeWin: 'n/a（彩排跑的是本机 Linux/Windows Node，不是镜像里的 Windows Node 20.18.0）',
                 nodeHost: process.version,
                 signatureModule: 'test/fixtures/mock-bdms.mjs',
                 upstream: origin,
@@ -165,6 +162,11 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
 
         async healthz(index) {
             return fetchHealthz(ports[index])
+        },
+
+        /** ready / http / refused / hung */
+        async probePort(index) {
+            return probeHealthz(ports[index])
         },
 
         async waitForReady(timeoutMs) {
@@ -193,7 +195,7 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
             } catch {
                 /* 还没写 */
             }
-            return { bytes: text.length, tail: text.split('\n').filter(Boolean).slice(-8) }
+            return { bytes: text.length, tail: tailLines(text) }
         },
         /** true = 进程在；false = 确认不在；null = 没有这个进程的记录，无法判断。 */
         async pidAlive(index) {
