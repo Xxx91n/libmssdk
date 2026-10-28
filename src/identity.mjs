@@ -27,10 +27,14 @@ const CORRUPT_SUFFIX = '.corrupt'
 /** 独占创建的重试轮数：第二轮以后只可能由「并发进程刚刚挪走坏文件」触发。 */
 const CREATE_ATTEMPTS = 3
 
-/** 独占创建成功的一方写盘需要时间，这段时间里文件可能是 0 字节。
- *  把它判成「损坏」并挪走，就会毁掉赢家的成果、重新分裂，所以读不到时先等一会儿。 */
+/** 独占创建成功的一方写盘需要时间，这段时间里文件可能是 0 字节或半截。把它判成「损坏」
+ *  并挪走就会毁掉赢家的成果、重新分裂，所以要「连续两次读到同一份不合法内容」并且预算
+ *  用完，才认定它是真的坏了。预算用完内容还在变（并发进程在反复动它）就不等了，直接放弃。 */
 const DEFAULT_READ_BUDGET_MS = 1000
 const READ_POLL_MS = 5
+
+/** 写完回读核对的次数：读不动多半是几毫秒的抖动（EMFILE、杀软占用），重试一次就过去了。 */
+const READBACK_POLLS = 3
 
 /** 身份文件目录：默认 <仓库>/data，可用 LIBMSSDK_STATE_DIR 改到别处。 */
 export function stateDir() {
@@ -115,13 +119,26 @@ function createIdentityFile(dir) {
         fs.closeSync(fd)
     }
     // 写完再回读一次核对：从创建到写盘之间如果隔得太久（Wine + 挂出来的数据卷上不是没可能），
-    // 别人会把这个还是空的文件当成损坏文件挪走并重建。磁盘上的那份才是大家共用的身份，
-    // 认它 —— 否则创建者内存里的设备号和文件里的就又不一样了。
-    // 只是读不动（被占用 / 没权限）不算被抢：那份内容就是我们刚写下去的。
-    const found = inspectIdentityFile(dir)
-    if (found.status === 'unreadable') return { identity }
-    if (found.status !== 'valid' || found.identity.device_id !== identity.device_id) return { exists: true }
-    return { identity }
+    // 别人会把这个还是空的文件当成损坏文件挪走并重建。磁盘上的那份才是大家共用的身份，认它。
+    const confirmed = confirmIdentityFile(dir, identity)
+    if (confirmed.identity) return confirmed
+    if (confirmed.exists) return { exists: true }
+    // 写成功但一直读不回来：这份内容就是我们刚写下去的，继续用它，但不能声称已验证
+    return { identity, unconfirmed: true }
+}
+
+/** 回读核对。读不动时先重试几次（EMFILE / 杀软占用都是几毫秒的抖动）再下结论。 */
+function confirmIdentityFile(dir, identity) {
+    for (let poll = 0; poll < READBACK_POLLS; poll += 1) {
+        const found = inspectIdentityFile(dir)
+        if (found.status === 'absent') return { exists: true }
+        if (found.status === 'valid') {
+            return found.identity.device_id === identity.device_id ? { identity: found.identity } : { exists: true }
+        }
+        // unreadable / invalid 都再等一轮：宁可多读一次，也不凭一次抖动就断定这份身份不算数
+        sleep(READ_POLL_MS)
+    }
+    return { unconfirmed: true }
 }
 
 /**
@@ -155,50 +172,61 @@ function sleep(ms) {
  */
 export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = DEFAULT_READ_BUDGET_MS, log = logEvent } = {}) {
     const warn = (reason, message) => log('identity', { level: 'warn', reason, message })
-    const bail = (reason, message) => {
+    /** 只把设备号留在内存里：跨重启会变，所以必须留一条告警。 */
+    const inMemoryOnly = (identity, reason, message) => {
         warn(reason, message)
-        return { identity: generateIdentity(), created: true, persisted: false }
+        return { identity, created: true, persisted: false }
     }
+    const giveUp = (reason, message) => inMemoryOnly(generateIdentity(), reason, message)
 
     try {
         fs.mkdirSync(dir, { recursive: true })
     } catch (error) {
-        return bail('state-dir-unusable', `身份目录建不出来，本次只在内存里保留设备号：${dir}（${error.message}）`)
+        return giveUp('state-dir-unusable', `身份目录建不出来，本次只在内存里保留设备号：${dir}（${error.message}）`)
     }
 
-    // 一轮 = 一次独占创建尝试。只有「文件在、读到的是不合法内容、而且这份内容不再变化」才会退到下一轮。
+    // 一轮 = 一次独占创建尝试。只有「读到的是不合法内容、而且这份内容不再变化」才会退到下一轮。
     for (let attempt = 0; attempt < CREATE_ATTEMPTS; attempt += 1) {
         const created = createIdentityFile(dir)
-        if (created.identity) return { identity: created.identity, created: true, persisted: true }
-        if (created.error) return bail('create-failed', `身份文件写不下去，本次只在内存里保留设备号：${created.error.message}`)
+        if (created.identity) {
+            if (!created.unconfirmed) return { identity: created.identity, created: true, persisted: true }
+            return inMemoryOnly(
+                created.identity,
+                'unconfirmed',
+                '身份文件写得下去却读不回来（被占用 / 没权限）：这份设备号大概就在文件里，但没法验证',
+            )
+        }
+        if (created.error) return giveUp('create-failed', `身份文件写不下去，本次只在内存里保留设备号：${created.error.message}`)
         // 走到这里只剩「已存在」：多半是别的进程刚刚建的，回读它的值，绝不覆盖。
 
-        const deadline = performance.now() + readBudgetMs
+        const settleAt = performance.now() + readBudgetMs
+        const giveUpAt = settleAt + readBudgetMs
         let lastSeen
         for (;;) {
             const found = inspectIdentityFile(dir)
             if (found.status === 'valid') return { identity: found.identity, created: false, persisted: true }
             if (found.status === 'absent') break
 
-            // 读不动，或读到了不合法的内容。后者很可能只是刚被独占创建出来、还没写完的空文件，
-            // 所以先等创建者收工。判它「坏」的前提是连续两次读到同一份内容 —— 内容还在变就说明
-            // 有人在写，这时候挪走它就会分裂。
+            const now = performance.now()
+            if (now >= giveUpAt) {
+                return giveUp('churning', `身份文件在 ${readBudgetMs * 2}ms 里一直在变，判不出是没写完还是坏了，本次只在内存里保留设备号`)
+            }
+            // 判「坏」要连续两次读到同一份内容：内容还在变说明有人在写，这时候挪走它就会分裂。
             const seen = `${found.status}:${found.raw ?? ''}`
-            const settled = seen === lastSeen
-            lastSeen = seen
-            if (settled && performance.now() >= deadline) {
+            if (seen === lastSeen && now >= settleAt) {
                 if (found.status === 'unreadable') {
-                    return bail('unreadable', `身份文件读不动，本次只在内存里保留设备号：${found.error.message}`)
+                    return giveUp('unreadable', `身份文件读不动，本次只在内存里保留设备号：${found.error.message}`)
                 }
                 if (!retireCorruptIdentity(dir)) {
-                    return bail('stuck', '身份文件内容不合法而且挪不动（可能被占用），本次只在内存里保留设备号')
+                    return giveUp('stuck', '身份文件内容不合法而且挪不动（可能被占用），本次只在内存里保留设备号')
                 }
                 warn('rebuild', `身份文件内容不合法，重建一个新设备号；原来的坏文件挪到了 ${identityFile(dir)}${CORRUPT_SUFFIX}`)
                 break
             }
+            lastSeen = seen
             sleep(READ_POLL_MS)
         }
     }
 
-    return bail('stuck', `身份文件在 ${CREATE_ATTEMPTS} 次独占创建尝试里一直读不出合法设备号（有并发进程同时在修它），本次只在内存里保留`)
+    return giveUp('churning', `身份文件在 ${CREATE_ATTEMPTS} 次独占创建尝试里反复被并发进程改动，本次只在内存里保留设备号`)
 }

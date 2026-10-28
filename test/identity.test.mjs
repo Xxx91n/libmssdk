@@ -15,8 +15,8 @@ const racerPath = path.join(here, 'helpers', 'identity-race-child.mjs')
 const { identityFile, prepareStoredIdentity, readStoredIdentity } = await import('../src/identity.mjs')
 
 const PROCESS_COUNT = 4
-/** 判据要求「连跑数十轮」；CI 上嫌慢可以用 LIBMSSDK_IDENTITY_RACE_ROUNDS 调小。 */
-const ROUNDS = Number(process.env.LIBMSSDK_IDENTITY_RACE_ROUNDS || 30)
+/** 判据要求「连跑数十轮」；CI 上嫌慢可以用 LIBMSSDK_IDENTITY_RACE_ROUNDS 调小，但不许调成 0。 */
+const ROUNDS = Math.max(1, Number(process.env.LIBMSSDK_IDENTITY_RACE_ROUNDS) || 30)
 const STARTUP_TIMEOUT_MS = 20_000
 
 const running = new Set()
@@ -27,6 +27,17 @@ after(() => {
 
 function tempStateDir() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'libmssdk-identity-'))
+}
+
+/** 每个用例一个空目录，收完就删；warn 不进 stdout，改进 notes。 */
+function withTempStateDir(run) {
+    const dir = tempStateDir()
+    const notes = []
+    try {
+        return run({ dir, notes, log: (event, detail) => notes.push(detail) })
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+    }
 }
 
 function once(emitter, event) {
@@ -66,7 +77,12 @@ async function raceStart(dir) {
     })
 
     try {
-        await Promise.all(children.map(child => once(child, 'message')))
+        // 就绪也要有超时：子进程在 import 阶段就死了的话，这里不能把整个用例挂住
+        await withTimeout(
+            Promise.all(children.map(child => once(child, 'message'))),
+            STARTUP_TIMEOUT_MS,
+            () => `身份竞争子进程未就绪（可能压根没起来）：${output.join('')}`,
+        )
         // 先把收信的监听挂上，再喊开始：子进程回话时不能有窗口没人听
         const replies = Promise.all(children.map(child => once(child, 'message')))
         for (const child of children) child.send({ go: true })
@@ -120,7 +136,6 @@ test(`${PROCESS_COUNT} 个进程同时首次启动 ${ROUNDS} 轮：设备号始�
 })
 
 test('身份文件已存在时只回读，不覆盖也不告警', () => {
-    const dir = tempStateDir()
     const existing = {
         device_id: '3123456789012345',
         iid: '3987654321098765',
@@ -128,109 +143,71 @@ test('身份文件已存在时只回读，不覆盖也不告警', () => {
         created_at: '2026-01-01T00:00:00.000Z',
     }
     const before = `${JSON.stringify(existing, null, 2)}\n`
-    try {
+    withTempStateDir(({ dir, notes, log }) => {
         fs.writeFileSync(identityFile(dir), before)
-        const notes = []
-        const prepared = prepareStoredIdentity({ dir, log: (event, detail) => notes.push(detail) })
+        const prepared = prepareStoredIdentity({ dir, log })
         assert.equal(prepared.created, false)
         assert.equal(prepared.persisted, true)
         assert.equal(prepared.identity.device_id, existing.device_id)
         assert.equal(fs.readFileSync(identityFile(dir), 'utf8'), before, '格式合法就不该动这个文件')
         assert.deepEqual(notes, [], '正常回读不该出声')
-    } finally {
-        fs.rmSync(dir, { recursive: true, force: true })
-    }
+    })
 })
 
 test('内容损坏时重建并留下告警日志，坏文件挪开而不是删掉', () => {
     for (const broken of ['', '{ 不是 JSON', '{"device_id":"700000000000000"}', '{"device_id":""}']) {
-        const dir = tempStateDir()
-        try {
+        withTempStateDir(({ dir, notes, log }) => {
             fs.writeFileSync(identityFile(dir), broken)
-            const notes = []
-            const prepared = prepareStoredIdentity({
-                dir,
-                readBudgetMs: 30,
-                log: (event, detail) => notes.push(detail),
-            })
+            const prepared = prepareStoredIdentity({ dir, readBudgetMs: 30, log })
             assert.equal(prepared.created, true, `损坏内容应重建：${JSON.stringify(broken)}`)
             assert.match(readStoredIdentity(dir).device_id, /^[1-8]\d{15}$/)
+            assert.deepEqual(fs.readdirSync(dir).sort(), ['identity.json', 'identity.json.corrupt'])
             assert.equal(
                 notes.filter(item => item.level === 'warn').length,
                 1,
                 `重建应该只留一条告警：${JSON.stringify(broken)} → ${JSON.stringify(notes)}`,
             )
-            assert.deepEqual(fs.readdirSync(dir).sort(), ['identity.json', 'identity.json.corrupt'])
-        } finally {
-            fs.rmSync(dir, { recursive: true, force: true })
-        }
+        })
     }
 })
 
 test('身份文件读不动时不挪走它：没读到过内容的东西不能当成坏文件', () => {
-    const dir = tempStateDir()
-    try {
+    withTempStateDir(({ dir, notes, log }) => {
         // identity.json 位置放一个目录：读它报的是 EISDIR 而不是 ENOENT，等价于「被占用 / 没权限」
         fs.mkdirSync(identityFile(dir))
-        const notes = []
-        const prepared = prepareStoredIdentity({
-            dir,
-            readBudgetMs: 30,
-            log: (event, detail) => notes.push(detail),
-        })
+        const prepared = prepareStoredIdentity({ dir, readBudgetMs: 30, log })
         assert.equal(prepared.persisted, false, '读不动时不该假装身份已经落盘')
         assert.match(prepared.identity.device_id, /^[1-8]\d{15}$/)
         assert.deepEqual(fs.readdirSync(dir), ['identity.json'], '读不动的那一份不该被挪走')
-        assert.equal(fs.existsSync(`${identityFile(dir)}.corrupt`), false)
-        assert.ok(
-            notes.some(item => item.level === 'warn'),
-            `读不动要留下告警：${JSON.stringify(notes)}`,
-        )
-    } finally {
-        fs.rmSync(dir, { recursive: true, force: true })
-    }
+        assert.ok(notes.some(item => item.level === 'warn'), `读不动要留下告警：${JSON.stringify(notes)}`)
+    })
 })
 
 test('坏文件挪不动时不重建：留在原地、用内存里的设备号并告警', () => {
-    const dir = tempStateDir()
-    try {
+    withTempStateDir(({ dir, notes, log }) => {
         fs.writeFileSync(identityFile(dir), '{ 设备号都不合法')
         // 挪过去的目标位置被一个目录占住：rename 只会报错，不会成功
         fs.mkdirSync(`${identityFile(dir)}.corrupt`)
-        const notes = []
-        const prepared = prepareStoredIdentity({
-            dir,
-            readBudgetMs: 30,
-            log: (event, detail) => notes.push(detail),
-        })
+        const prepared = prepareStoredIdentity({ dir, readBudgetMs: 30, log })
         assert.equal(prepared.persisted, false, '挪不动时不该假装身份已经落盘')
         assert.equal(readStoredIdentity(dir), null)
         assert.equal(fs.readFileSync(identityFile(dir), 'utf8'), '{ 设备号都不合法', '挪不动就该原样留在原地')
-        assert.ok(
-            notes.some(item => item.reason === 'stuck'),
-            `挪不动要留下告警：${JSON.stringify(notes)}`,
-        )
-    } finally {
-        fs.rmSync(dir, { recursive: true, force: true })
-    }
+        assert.ok(notes.some(item => item.reason === 'stuck'), `挪不动要留下告警：${JSON.stringify(notes)}`)
+    })
 })
 
 test('只读入口不创建也不改写，worker 只能拿到主进程留下的那一份', () => {
-    const dir = tempStateDir()
-    try {
+    withTempStateDir(({ dir }) => {
         assert.equal(readStoredIdentity(dir), null, '没有身份文件时只读入口不该生成')
         assert.deepEqual(fs.readdirSync(dir), [], '只读入口不该留下任何文件')
 
         const prepared = prepareStoredIdentity({ dir })
         const written = fs.readFileSync(identityFile(dir))
         assert.equal(readStoredIdentity(dir).device_id, prepared.identity.device_id)
-
         assert.equal(fs.readFileSync(identityFile(dir)).equals(written), true, '只读入口改了身份文件的内容')
 
         const missingDir = path.join(dir, 'never-created')
         assert.equal(readStoredIdentity(missingDir), null)
         assert.equal(fs.existsSync(missingDir), false, '只读入口不该把 state 目录建出来')
-    } finally {
-        fs.rmSync(dir, { recursive: true, force: true })
-    }
+    })
 })
