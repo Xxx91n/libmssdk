@@ -58,6 +58,8 @@ bash verify/wine-multi/run.sh --mode mock
 
 判据 2 的门禁是「上游接不接受这份签名」，**不是** `fullTrack`：后者取决于账号权益与设备身份
 （#10 在查这件事），把它当门禁会把权益问题误报成多进程问题。`fullTrack` 与曲目时长仍如实记在结果里。
+同样地，判据 2 PASS 也不背书凭据是否有效：实测用一个明显是假的 cookie 打真实 `track_v2`，
+上游照样回 `200 / 17 KB`——这个端点验的是签名的头，不是登录态。
 
 ## 前置条件
 
@@ -66,7 +68,9 @@ bash verify/wine-multi/run.sh --mode mock
    也可 `--client-dir` 指向你自己的汽水版本目录。仓库不含也不分发它们。
 3. **要打真实上游才需要 cookie**：`--env-file` 指一个 600 权限的文件，里面一行
    `LIBMSSDK_COOKIE=<原始 cookie 串>`（带 `;` 和 `=` 原样写就行，脚本按行读取，**不做 `source` 求值**）。
-   它只传给宿主侧的 harness 进程，**不进镜像、不进容器环境变量、不出现在 `docker inspect`、不进结果文件**。
+   它只存在于宿主侧 harness 进程的环境与请求体里：**不进镜像、不进容器环境变量、不出现在
+   `docker inspect`、不进结果文件**。注意它会随签名请求体进入容器内的 `/sign`——签名覆盖
+   「URL + 全部请求头」，cookie 就是其中之一，这是契约要求的，不是泄露。
 4. **一个 `track_id`**：用本机实际播放过的曲子最能说明问题。
 5. 首次构建镜像需要能访问 `dl.winehq.org` 与 `nodejs.org`（约 3–5 分钟）。
 6. **宿主侧 Node ≥ 20.11**（harness 用到 `import.meta.dirname`）。容器里跑的是镜像钉住的

@@ -6,7 +6,8 @@
 #
 # 真环境需要（全部由用户提供，仓库里没有也不入库）：
 #   1. bdms.node + metasecml.dll（--client-dir，默认 vendor/soda-music）
-#   2. 要跑上游判据时给 cookie：--env-file <文件>（权限 600，只 source 给宿主侧进程，不进容器、不进 docker 配置）
+#   2. 要跑上游判据时给 cookie：--env-file <文件>（600；按行取值、不做 shell 求值，
+#      不进容器环境变量、不进 docker 配置、不进结果；它会随签名请求体进容器，这是契约要求的）
 # 结论走 harness.mjs；这个脚本只管镜像、容器、二进制进容器、收尾。
 set -euo pipefail
 
@@ -41,7 +42,8 @@ usage() {
   --rounds <N>           连打轮数（docker 默认 10，mock 默认 3）
   --ready-timeout-ms <N> 等两个进程就绪的预算（docker 默认 180000，Wine prefix 首启用得上）
   --client-dir <目录>    自备 bdms.node / metasecml.dll 所在目录（默认 vendor/soda-music）
-  --env-file <文件>      给 LIBMSSDK_COOKIE 用的环境文件（600，只 source 给宿主侧，不进容器）
+  --env-file <文件>      给 LIBMSSDK_COOKIE 用的环境文件（600，按行取值不做 shell 求值；
+                         不进容器环境变量、不进 docker 配置、不进结果文件）
   --image <tag>          使用/产出的镜像 tag（默认 libmssdk:local）
   --dockerfile <path>    构建用的 Dockerfile（默认 deploy/Dockerfile）
   --skip-build           镜像已存在时不重建（到 dl.winehq.org 的 IPv6 不通时用这个 + 自建镜像）
@@ -122,13 +124,14 @@ if [[ -n "$ENVFILE" ]]; then
         local want=$1 line name value
         while IFS= read -r line || [[ -n "$line" ]]; do
             line=${line%$'\r'}    # 环境文件在 Windows 上编辑过就是 CRLF，带个 \r 会把 cookie 弄坏
+            [[ "$line" == *=* ]] || continue    # 没有等号的行跳过：否则键名自己会变成值被当凭据发出去
             name=${line%%=*}
             value=${line#*=}
             [[ "$name" == "$want" ]] || continue
-            # 允许写成 KEY="…" / KEY='…' 的形式
-            if [[ ${value} == \"*\" ]]; then
+            # 只有整体被一对同类引号包住、且内部没有裸引号时才剥掉，免得把 "a=1"; b="c" 剪坏
+            if [[ ${#value} -ge 2 && ${value:0:1} == '"' && ${value: -1} == '"' && ${value:1:${#value}-2} != *'"'* ]]; then
                 value=${value:1:${#value}-2}
-            elif [[ ${value} == \'*\' ]]; then
+            elif [[ ${#value} -ge 2 && ${value:0:1} == "'" && ${value: -1} == "'" && ${value:1:${#value}-2} != *"'"* ]]; then
                 value=${value:1:${#value}-2}
             fi
             printf '%s' "$value"
@@ -138,7 +141,7 @@ if [[ -n "$ENVFILE" ]]; then
     }
     if COOKIE_FROM_FILE=$(read_env_value LIBMSSDK_COOKIE); then
         export LIBMSSDK_COOKIE="$COOKIE_FROM_FILE"
-        echo "[verify] 从 $ENVFILE 读到 LIBMSSDK_COOKIE（${#LIBMSSDK_COOKIE} 字符；只给宿主侧进程，不进容器、不进 docker 配置）"
+        echo "[verify] 从 $ENVFILE 读到 LIBMSSDK_COOKIE（${#LIBMSSDK_COOKIE} 字符；不进容器环境变量、不进 docker 配置、不进结果文件）"
     else
         die "$ENVFILE 里没有 LIBMSSDK_COOKIE=… 这一行"
     fi
