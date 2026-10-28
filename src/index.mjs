@@ -38,7 +38,7 @@ async function commandServe() {
         version: VERSION,
         bdmsAvailable: signer.available,
         auth: Boolean(config.token),
-        // persisted=false 意味着设备号只在内存里、重启就变：启动日志要当场说出去，不能等运维去翻 /config
+        // persisted=false 意味着设备号只在内存里、重启就变：启动日志要当场说出去
         identityPersisted: config.identityPersisted,
     })
     const shutdown = () => server.close(() => process.exit(0))

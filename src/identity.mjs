@@ -24,7 +24,7 @@ const IDENTITY_FILE_NAME = 'identity.json'
  *  「这台机器分裂过」的证据；但也不为每次损坏堆一堆文件。 */
 const CORRUPT_SUFFIX = '.corrupt'
 
-/** 独占创建的重试轮数：第二轮以后只可能由「并发进程刚刚挪走坏文件」触发。 */
+/** 独占创建的重试轮数：第二轮由「这一轮的坏内容被挪走了」或「并发进程刚刚动过文件」触发。 */
 const CREATE_ATTEMPTS = 3
 
 /** 独占创建成功的一方写盘需要时间，这段时间里文件可能是 0 字节或半截。把它判成「损坏」
@@ -37,7 +37,7 @@ const READ_POLL_MS = 5
 const READBACK_POLLS = 3
 
 /** 身份文件目录：默认 <仓库>/data，可用 LIBMSSDK_STATE_DIR 改到别处。 */
-export function stateDir() {
+function stateDir() {
     return (process.env.LIBMSSDK_STATE_DIR || '').trim() || DEFAULT_STATE_DIR
 }
 
@@ -100,45 +100,44 @@ function inspectIdentityFile(dir) {
     return identity ? { status: 'valid', identity } : { status: 'invalid', raw }
 }
 
-/** 独占创建：本进程成功即说明它是唯一写入者。 */
+/** 独占创建 + 回读核对，返回 created / unconfirmed / exists / failed 四种结果之一。 */
 function createIdentityFile(dir) {
     const file = identityFile(dir)
     let fd
     try {
         fd = fs.openSync(file, 'wx', 0o600)
     } catch (error) {
-        if (error.code === 'EEXIST') return { exists: true }
-        return { error }
+        if (error.code === 'EEXIST') return { status: 'exists' }
+        return { status: 'failed', error }
     }
     const identity = generateIdentity()
     try {
         fs.writeFileSync(fd, `${JSON.stringify(identity, null, 2)}\n`)
     } catch (error) {
-        return { error }
+        return { status: 'failed', error }
     } finally {
         fs.closeSync(fd)
     }
-    // 写完再回读一次核对：从创建到写盘之间如果隔得太久（Wine + 挂出来的数据卷上不是没可能），
+    // 写完再回读核对：从创建到写盘之间如果隔得太久（Wine + 挂出来的数据卷上不是没可能），
     // 别人会把这个还是空的文件当成损坏文件挪走并重建。磁盘上的那份才是大家共用的身份，认它。
-    const confirmed = confirmIdentityFile(dir, identity)
-    if (confirmed.identity) return confirmed
-    if (confirmed.exists) return { exists: true }
-    // 写成功但一直读不回来：这份内容就是我们刚写下去的，继续用它，但不能声称已验证
-    return { identity, unconfirmed: true }
+    // 一直读不回来时（被占用 / 没权限）不能声称已验证，但内容确实是我们写下去的。
+    return confirmIdentityFile(dir, identity)
 }
 
 /** 回读核对。读不动时先重试几次（EMFILE / 杀软占用都是几毫秒的抖动）再下结论。 */
 function confirmIdentityFile(dir, identity) {
     for (let poll = 0; poll < READBACK_POLLS; poll += 1) {
         const found = inspectIdentityFile(dir)
-        if (found.status === 'absent') return { exists: true }
         if (found.status === 'valid') {
-            return found.identity.device_id === identity.device_id ? { identity: found.identity } : { exists: true }
+            return found.identity.device_id === identity.device_id
+                ? { status: 'created', identity: found.identity }
+                : { status: 'exists' }
         }
+        if (found.status === 'absent') return { status: 'exists' }
         // unreadable / invalid 都再等一轮：宁可多读一次，也不凭一次抖动就断定这份身份不算数
-        sleep(READ_POLL_MS)
+        if (poll + 1 < READBACK_POLLS) sleep(READ_POLL_MS)
     }
-    return { unconfirmed: true }
+    return { status: 'unconfirmed', identity }
 }
 
 /**
@@ -188,16 +187,18 @@ export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = DEFAULT
     // 一轮 = 一次独占创建尝试。只有「读到的是不合法内容、而且这份内容不再变化」才会退到下一轮。
     for (let attempt = 0; attempt < CREATE_ATTEMPTS; attempt += 1) {
         const created = createIdentityFile(dir)
-        if (created.identity) {
-            if (!created.unconfirmed) return { identity: created.identity, created: true, persisted: true }
+        if (created.status === 'created') return { identity: created.identity, created: true, persisted: true }
+        if (created.status === 'unconfirmed') {
             return inMemoryOnly(
                 created.identity,
                 'unconfirmed',
                 '身份文件写得下去却读不回来（被占用 / 没权限）：这份设备号大概就在文件里，但没法验证',
             )
         }
-        if (created.error) return giveUp('create-failed', `身份文件写不下去，本次只在内存里保留设备号：${created.error.message}`)
-        // 走到这里只剩「已存在」：多半是别的进程刚刚建的，回读它的值，绝不覆盖。
+        if (created.status === 'failed') {
+            return giveUp('create-failed', `身份文件写不下去，本次只在内存里保留设备号：${created.error.message}`)
+        }
+        // created.status === 'exists'：多半是别的进程刚刚建的，回读它的值，绝不覆盖。
 
         const settleAt = performance.now() + readBudgetMs
         const giveUpAt = settleAt + readBudgetMs
@@ -217,6 +218,11 @@ export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = DEFAULT
                 if (found.status === 'unreadable') {
                     return giveUp('unreadable', `身份文件读不动，本次只在内存里保留设备号：${found.error.message}`)
                 }
+                // 动手之前再读最后一次：上面两次观察之间可能刚好有内容落进来（读 → 改名不是原子的），
+                // 这一眼把「以为坏了、其实已经写好」的窗口压到一次读的长度。
+                const latest = inspectIdentityFile(dir)
+                if (latest.status === 'valid') return { identity: latest.identity, created: false, persisted: true }
+                if (latest.status !== 'invalid' || `${latest.status}:${latest.raw ?? ''}` !== seen) break
                 if (!retireCorruptIdentity(dir)) {
                     return giveUp('stuck', '身份文件内容不合法而且挪不动（可能被占用），本次只在内存里保留设备号')
                 }

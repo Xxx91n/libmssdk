@@ -15,8 +15,9 @@ const racerPath = path.join(here, 'helpers', 'identity-race-child.mjs')
 const { identityFile, prepareStoredIdentity, readStoredIdentity } = await import('../src/identity.mjs')
 
 const PROCESS_COUNT = 4
-/** 判据要求「连跑数十轮」；CI 上嫌慢可以用 LIBMSSDK_IDENTITY_RACE_ROUNDS 调小，但不许调成 0。 */
-const ROUNDS = Math.max(1, Number(process.env.LIBMSSDK_IDENTITY_RACE_ROUNDS) || 30)
+/** 判据要求「连跑数十轮」；嫌慢可以用 LIBMSSDK_IDENTITY_RACE_ROUNDS 调小，但调不成 0 —— 那等于不断言。 */
+const requestedRounds = Number(process.env.LIBMSSDK_IDENTITY_RACE_ROUNDS)
+const ROUNDS = Number.isInteger(requestedRounds) && requestedRounds > 0 ? requestedRounds : 30
 const STARTUP_TIMEOUT_MS = 20_000
 
 const running = new Set()

@@ -9,7 +9,7 @@
 | --- | --- |
 | Node.js 18+ | 唯一必装项。从你的客户端复制文件后，实测 v24 可直接加载原生模块 |
 | 签名模块 | 由你提供：从自己安装的汽水客户端复制 `bdms.node` + `metasecml.dll` 到 `vendor/soda-music/` |
-| 设备身份 | **自动生成**：首次运行随机生成 16 位 `device_id`/`iid`/`fp` 并写入 `data/identity.json`，跨重启复用 |
+| 设备身份 | **自动生成**：首次运行用独占创建生成 16 位 `device_id`/`iid`/`fp` 并写入 `data/identity.json`，跨重启复用；多个进程同时首次启动也只生成一份 |
 | 账号 Cookie | 可选但 VIP 曲目必需；用 libresoda 的扫码登录或从客户端抓 |
 
 > `vendor/soda-music/` 里的两个官方文件被 `.gitignore` 忽略，不要提交或分发。
@@ -84,7 +84,12 @@ export QISHUI_SIGNER_URL=http://127.0.0.1:18899/sign
 确需监听局域网时，务必同时设置 `LIBMSSDK_TOKEN` 并用防火墙限制来源网段。
 
 服务以 SYSTEM/服务账号运行时，若仓库目录不可写，用 `LIBMSSDK_STATE_DIR`
-指一个可写目录放 `identity.json`（否则设备号会在内存里临时生成、重启就变）。
+指一个可写目录放 `identity.json`（否则设备号只在内存里、重启就变，启动日志会留一条
+`reason=state-dir-unusable` 或 `create-failed` 的告警，`/healthz` 不受影响）。
+
+`identity.json` 里的内容读不出合法设备号时，服务把它挪到 `identity.json.corrupt`
+（保留证据，只留最近一份）并重建一个新设备号，日志留一条 `reason=rebuild` 的告警。
+格式合法的文件不会被重建 —— 给已经存在的身份「纠错」等于再换一张脸。
 
 ## 4. 用 Electron 跑（Node ABI 不匹配时）
 
