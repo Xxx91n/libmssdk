@@ -14,6 +14,8 @@ import { buildTrackV2Request, summarizeTrackV2Response } from './probe.mjs'
 import { errorResponse, normalizeSignRequest, signResponse } from './contract.mjs'
 import { logError, logEvent } from './log.mjs'
 
+// 身份在这里就完成「读到或用独占创建生成」：之后派生出去的 worker 只允许走
+// src/identity.mjs 的只读入口，任何进程内都不能再有第二条创建路径。
 const config = loadConfig()
 const signer = new BdmsSigner({ modulePath: config.bdmsModule, deviceId: config.deviceId })
 

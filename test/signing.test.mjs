@@ -21,7 +21,8 @@ process.env.LIBMSSDK_BIND = '127.0.0.1'
 const { BdmsSigner, flattenHeaders, parseSignaturePairs } = await import('../src/bdms.mjs')
 const { normalizeSignRequest, ValidationError } = await import('../src/contract.mjs')
 const { buildTrackV2Request, summarizeTrackV2Response } = await import('../src/probe.mjs')
-const { bundledNative, loadConfig, randomDeviceId, resolveIdentity } = await import('../src/config.mjs')
+const { bundledNative, loadConfig, resolveIdentity } = await import('../src/config.mjs')
+const { randomDeviceId } = await import('../src/identity.mjs')
 
 let server
 let baseUrl
@@ -201,6 +202,7 @@ test('设备指纹：随机生成、落盘复用、可被环境变量覆盖', ()
         assert.match(first.iid, /^[1-8]\d{15}$/)
         assert.equal(first.fp, first.deviceId)
         assert.equal(first.source, 'state')
+        assert.equal(first.created, true, '首次运行应由本进程独占创建身份文件')
         assert.equal(first.persisted, true)
         assert.ok(fs.existsSync(path.join(dir, 'identity.json')))
 
@@ -208,6 +210,7 @@ test('设备指纹：随机生成、落盘复用、可被环境变量覆盖', ()
         const second = resolveIdentity()
         assert.equal(second.deviceId, first.deviceId)
         assert.equal(second.iid, first.iid)
+        assert.equal(second.created, false, '已有身份文件时不该再生成')
 
         // 环境变量优先级最高，且不写 state 文件
         process.env.LIBMSSDK_DEVICE_ID = '7000000000000001'
