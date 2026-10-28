@@ -90,7 +90,7 @@ export LIBMSSDK_CLIENT_DIR="/path/to/Soda Music/3.7.0"
 | `LIBMSSDK_BDMS_MODULE` | 直接指定 `bdms.node`；同目录需有 `metasecml.dll` |
 | `LIBMSSDK_DEVICE_ID` / `LIBMSSDK_IID` / `LIBMSSDK_FP` | 覆盖设备身份 |
 | `LIBMSSDK_TOKEN` | HTTP 服务鉴权 Token |
-| `LIBMSSDK_STATE_DIR` | 自动生成设备身份的保存目录 |
+| `LIBMSSDK_STATE_DIR` | 设备身份 `identity.json` 的保存目录；首次启动用独占创建写入，多个进程同时启动也只生成一份 |
 
 Cloudflare Workers 不能运行 `bdms.node` / `metasecml.dll`，因此不能承载本服务的签名
 执行层。Worker 只能作为鉴权、限流或转发网关。
