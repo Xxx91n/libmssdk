@@ -85,6 +85,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$MODE" == mock ]]; then
+    command -v "$NODE_BIN" >/dev/null 2>&1 || die "没找到宿主侧 node（$NODE_BIN）：彩排也要用本机 node 跑"
     [[ -z "$ENVFILE" ]] || echo '[verify] 提醒：--mode mock 用随机哨兵串当 cookie，--env-file 在这里不生效（真实凭据不该进彩排）。' >&2
     echo '[verify] 彩排模式：本机 Node + 仓库自带 mock 签名模块 + 假上游，不碰 Docker/Wine/真实凭据。'
     MOCK_ARGS=(--mode mock --scenario "$SCENARIO")

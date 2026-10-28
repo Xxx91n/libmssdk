@@ -30,6 +30,9 @@ bash verify/wine-multi/run.sh --mode mock
 | 5 两个进程共用同一份身份 | 两个 `/healthz` 的脱敏设备号彼此相同且等于身份文件 | 单列发现（device_id 分裂属 #2） |
 | 6 输出与日志不泄露 | 扫 serve 自己的日志，找 cookie / 签名值 / 完整设备号；结果文件在写盘前拦 | 脱敏失败 |
 
+判据 4 只判「服务断没断」。存活方签出的头被上游打回，会照样记进形态二与计数，但**不**把判据 4
+翻成 FAIL——上游接不接受是判据 2/3 的领域，账号权益问题不该看起来像多进程坏了。
+
 三种失败形态靠**可观察特征**区分，不靠猜：
 
 * **进程起不来（含起来过又退出）** —— 该进程的 pid 确认不在了；或 pid 还在但端口拒绝连接（没在监听），通常伴随 `stderr` 有内容。
@@ -60,6 +63,8 @@ bash verify/wine-multi/run.sh --mode mock
 
 镜像与卷：默认用 `deploy/Dockerfile` 构建 `libmssdk:local`，身份与 Wine prefix 各用一个命名卷。
 `--skip-build --image <已有 tag>` 复用镜像，`--data-volume` / `--wine-volume` 复用已有的身份与 prefix。
+跑完只删容器，**三个卷都保留**（身份卷、prefix 卷、日志卷）——换身份卷等于换一个设备号，
+删 prefix 卷等于下次冷启动重来；要清盘自己 `docker volume rm`。
 
 ## 已知的环境坑（跟产品无关，但会把复现带偏）
 

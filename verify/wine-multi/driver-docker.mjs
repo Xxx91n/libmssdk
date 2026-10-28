@@ -13,6 +13,8 @@ const execFileAsync = promisify(execFile)
 const LOG_DIR = '/logs'
 const IDENTITY_FILE = '/app/data/identity.json'
 const NODE_WIN = '/opt/node-win/node.exe'
+/** 容器内进程计数（含 Wine 侧的 node.exe 与 wineserver）——环境记录与存活证据共用一份。 */
+const COMM_COUNTS = 'for p in /proc/[0-9]*; do [ -r "$p/comm" ] && cat "$p/comm"; done 2>/dev/null | sort | uniq -c'
 
 function toPort(value, label) {
     const port = Number(value)
@@ -70,7 +72,8 @@ export function createDockerDriver({ container, containerPorts, hostPorts }) {
             const nodeWin = await wineNode('--version')
             const dockerVersion = (await docker(['version', '--format', '{{.Server.Version}}'])).trim()
             const image = (await docker(['inspect', '--format', '{{.Config.Image}}', container])).trim()
-            const wineserver = (await inContainer("for p in /proc/[0-9]*; do [ -r \"$p/comm\" ] && cat \"$p/comm\"; done 2>/dev/null | grep -c wineserver || true")).trim()
+            const counts = await inContainer(COMM_COUNTS)
+            const wineserverCount = Number(/(\d+)\s+wineserver/.exec(counts)?.[1] ?? 0)
             return {
                 kind: 'docker',
                 wine,
@@ -79,17 +82,17 @@ export function createDockerDriver({ container, containerPorts, hostPorts }) {
                 dockerServer: dockerVersion,
                 image,
                 container,
-                wineserverCount: Number(wineserver) || 0,
+                wineserverCount,
                 // 结构事实（run.sh 只挂了一个 /wine 卷给整个容器），不是测出来的结论；
                 // 实测证据是上面的 wineserverCount
                 winePrefix: '/wine',
                 sharedIdentityFile: IDENTITY_FILE,
-                summary: `镜像 ${image || '?'} / ${wine || 'wine ?'} / Windows Node ${nodeWin || '?'} / 宿主 Node ${process.version} / Docker ${dockerVersion} / wineserver ${Number(wineserver) || 0} 个`,
+                summary: `镜像 ${image || '?'} / ${wine || 'wine ?'} / Windows Node ${nodeWin || '?'} / 宿主 Node ${process.version} / Docker ${dockerVersion} / wineserver ${wineserverCount} 个`,
             }
         },
 
         async processSnapshot() {
-            const out = await inContainer('for p in /proc/[0-9]*; do [ -r "$p/comm" ] && cat "$p/comm"; done 2>/dev/null | sort | uniq -c')
+            const out = await inContainer(COMM_COUNTS)
             return out
                 .split('\n')
                 .map(line => line.trim())

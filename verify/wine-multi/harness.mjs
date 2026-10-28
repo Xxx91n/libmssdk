@@ -71,8 +71,19 @@ const cookie =
     String(process.env.LIBMSSDK_COOKIE || '').trim() ||
     (mode === 'mock' ? `verify-mock-cookie-${crypto.randomBytes(12).toString('hex')}` : '')
 const trackId = String(args.track || process.env.LIBMSSDK_VERIFY_TRACK_ID || (mode === 'mock' ? '1000000000000000001' : '')).trim()
-const rounds = Number(args.rounds || (mode === 'mock' ? 3 : 10))
-const readyTimeoutMs = Number(args['ready-timeout-ms'] || (mode === 'mock' ? 20000 : 180000))
+// 数字参数必须先校验：--rounds 0 会让判据 3 一次都不打然后报 PASS，
+// --ready-timeout-ms 非法会让探活循环直接跳过，把「什么都没观察到」报成形态三
+const positiveInt = (label, value, fallback) => {
+    if (value === undefined || value === '') return fallback
+    const parsed = Number(value)
+    if (!Number.isInteger(parsed) || parsed < 1) {
+        console.log(`[verify] ${label} 需要正整数，收到：${value}`)
+        process.exit(3)
+    }
+    return parsed
+}
+const rounds = positiveInt('--rounds', args.rounds, mode === 'mock' ? 3 : 10)
+const readyTimeoutMs = positiveInt('--ready-timeout-ms', args['ready-timeout-ms'], mode === 'mock' ? 20000 : 180000)
 // 签名腿 60 秒是给 Wine 冷启动留的余量（实测热态几十到一百多毫秒）；彩排只用 15 秒，
 // 因为「存活方挂住」这条判据就是靠超时来观察的
 const signTimeoutMs = mode === 'mock' ? 15000 : 60000
@@ -150,15 +161,16 @@ const report = {
     redaction: { forbidden: [], leaks: 0 },
 }
 
-function phaseFailed(phase) {
-    return report.failures.some(failure => failure.phase === phase)
+function phaseFailed(phase, ignoringShapes = []) {
+    return report.failures.some(failure => failure.phase === phase && !ignoringShapes.includes(failure.shape))
 }
 
 function recordFailure(phase, portIndex, shape, detail) {
     report.tally.shapes[shape] += 1
     const safe = redactor.sanitize('failure', detail)
-    report.failures.push({ phase, port: driver.hostPorts[portIndex], shape, detail: safe })
-    say(`[verify]   失败：端口 ${driver.hostPorts[portIndex]} — ${SHAPES[shape]}（${safe}）`)
+    const port = portIndex === null ? null : driver.hostPorts[portIndex]
+    report.failures.push({ phase, port, shape, detail: safe })
+    say(`[verify]   失败：${port === null ? '跨进程' : `端口 ${port}`} — ${SHAPES[shape]}（${safe}）`)
 }
 
 /**
@@ -380,7 +392,7 @@ async function main() {
               ? `${unreadable} 个进程的 /healthz 读不到脱敏设备号，无法比对——这不等于身份分裂`
               : '两个进程身份不一致：device_id 分裂属 #2 的范围；本验证在起进程前已落盘身份，正常不该出现',
     }
-    if (!identityConsistent) recordFailure('identity', 0, 'unclassified', report.criteria.identity.note)
+    if (!identityConsistent) recordFailure('identity', null, 'unclassified', report.criteria.identity.note)
 
     // ——— 判据 2：各自签的头各打一次真实上游 ———
     const hasUpstream = Boolean(cookie && trackId)
@@ -537,7 +549,9 @@ async function main() {
         }
     }
     report.criteria.survivor = {
-        status: survivor.ok && victimGone && !phaseFailed('survivor') ? 'PASS' : 'FAIL',
+        // 判据 4 只判「服务断没断」；存活方的上游被拒是形态二，已经记进 failures 并计入计数，
+        // 但它不该把「另一个进程继续服务」这条判据翻成 FAIL —— 那是判据 2/3 的领域
+        status: survivor.ok && victimGone && !phaseFailed('survivor', ['upstreamRejected']) ? 'PASS' : 'FAIL',
         victimPort: driver.hostPorts[victimIndex],
         survivorPort: driver.hostPorts[survivorIndex],
         victimGone,
@@ -558,7 +572,8 @@ async function main() {
     // 没跑过带 cookie 的判据时，「日志里没有 cookie」这条并没有被真正检验过，不能算 PASS
     const scannedFor = redactor.kinds()
     const uncovered = ['cookie', 'device_id', 'iid', 'fp'].filter(kind => !scannedFor.includes(kind))
-    const cookieCovered = scannedFor.includes('cookie')
+    // 登记了 cookie 不等于检验过 cookie：没有 --track 时它根本没进过任何签名与日志
+    const cookieCovered = scannedFor.includes('cookie') && hasUpstream
     report.criteria.logHygiene = {
         status: leakedKinds.size ? 'FAIL' : cookieCovered ? 'PASS' : 'PARTIAL',
         scannedBytes,
@@ -569,7 +584,7 @@ async function main() {
             ? ''
             : `没有 cookie 参与签名，日志扫描只覆盖了 ${scannedFor.join('/') || '（空）'}；未覆盖：${uncovered.join('/') || '无'}`,
     }
-    if (leakedKinds.size) recordFailure('logHygiene', 0, 'unclassified', `服务日志里出现了敏感值：${[...leakedKinds].join(', ')}`)
+    if (leakedKinds.size) recordFailure('logHygiene', null, 'unclassified', `服务日志里出现了敏感值：${[...leakedKinds].join(', ')}`)
     say(`[verify] 判据 6 ${report.criteria.logHygiene.status}：扫了 ${scannedBytes} 字节 serve 日志（查 ${scannedFor.join('/') || '无'}）`)
 
     printConclusion()
