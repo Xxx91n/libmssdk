@@ -19,6 +19,9 @@ const PROCESS_COUNT = 4
 const requestedRounds = Number(process.env.LIBMSSDK_IDENTITY_RACE_ROUNDS)
 const ROUNDS = Number.isInteger(requestedRounds) && requestedRounds > 0 ? requestedRounds : 30
 const STARTUP_TIMEOUT_MS = 20_000
+/** 稳定判据的等待预算。给足冗余：预算太小（旧值 30ms）时，一次被 CPU 抢占的 sleep 就会
+ *  越过 give-up 上界，把一份「内容根本没变」的坏文件误判成 churning —— 实测约每 6 轮翻一次。 */
+const SETTLE_BUDGET_MS = 400
 
 const running = new Set()
 
@@ -168,7 +171,7 @@ test('内容损坏时重建并留下告警日志，坏文件挪开而不是删�
     for (const broken of ['', '{ 不是 JSON', '{"device_id":"700000000000000"}', '{"device_id":""}']) {
         withTempStateDir(({ dir, notes, log }) => {
             fs.writeFileSync(identityFile(dir), broken)
-            const prepared = prepareStoredIdentity({ dir, readBudgetMs: 30, log })
+            const prepared = prepareStoredIdentity({ dir, readBudgetMs: SETTLE_BUDGET_MS, log })
             assert.equal(prepared.created, true, `损坏内容应重建：${JSON.stringify(broken)}`)
             assert.match(readStoredIdentity(dir).device_id, /^[1-8]\d{15}$/)
             assert.deepEqual(fs.readdirSync(dir).sort(), ['identity.json', 'identity.json.corrupt'])
@@ -185,7 +188,7 @@ test('身份文件读不动时不挪走它：没读到过内容的东西不能�
     withTempStateDir(({ dir, notes, log }) => {
         // identity.json 位置放一个目录：读它报的是 EISDIR 而不是 ENOENT，等价于「被占用 / 没权限」
         fs.mkdirSync(identityFile(dir))
-        const prepared = prepareStoredIdentity({ dir, readBudgetMs: 30, log })
+        const prepared = prepareStoredIdentity({ dir, readBudgetMs: SETTLE_BUDGET_MS, log })
         assert.equal(prepared.persisted, false, '读不动时不该假装身份已经落盘')
         assert.match(prepared.identity.device_id, /^[1-8]\d{15}$/)
         assert.deepEqual(fs.readdirSync(dir), ['identity.json'], '读不动的那一份不该被挪走')
@@ -198,7 +201,7 @@ test('坏文件挪不动时不重建：留在原地、用内存里的设备号�
         fs.writeFileSync(identityFile(dir), '{ 设备号都不合法')
         // 挪过去的目标位置被一个目录占住：rename 只会报错，不会成功
         fs.mkdirSync(`${identityFile(dir)}.corrupt`)
-        const prepared = prepareStoredIdentity({ dir, readBudgetMs: 30, log })
+        const prepared = prepareStoredIdentity({ dir, readBudgetMs: SETTLE_BUDGET_MS, log })
         assert.equal(prepared.persisted, false, '挪不动时不该假装身份已经落盘')
         assert.equal(readStoredIdentity(dir), null)
         assert.equal(fs.readFileSync(identityFile(dir), 'utf8'), '{ 设备号都不合法', '挪不动就该原样留在原地')
@@ -228,7 +231,10 @@ test('身份告警走 stderr，不污染 stdout，也不带出整段本机路径
     assert.equal(out, '', `身份告警写进了 stdout，会打断 bridge / selftest 的 JSON.parse：${out}`)
     assert.match(err, /"event":"identity"/, '告警应走 stderr')
     assert.match(err, /"reason":"state-dir-unusable"/)
-    assert.ok(!err.includes(os.homedir()), `告警不该带出家目录（含用户名）：${err}`)
+    // 断言绝对路径根本不出现在告警里，而不是只比对 os.homedir()：
+    // 家目录是 C:\Users\Administrator 时，TMP 可能解析成 8.3 短名 C:\Users\ADMINI~1，
+    // 只查长形态会「测试通过却漏路径」。
+    assert.ok(!/[A-Za-z]:[\\/]/.test(err), `告警不该带出绝对路径：${err}`)
 })
 
 test('只读入口不创建也不改写，worker 只能拿到主进程留下的那一份', () => {

@@ -14,7 +14,6 @@
 
 import crypto from 'node:crypto'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { logWarn } from './log.mjs'
@@ -34,7 +33,8 @@ const CREATE_ATTEMPTS = 3
 /** 独占创建成功的一方写盘需要时间，这段时间里文件可能是 0 字节或半截。把它判成「损坏」
  *  并挪走就会毁掉赢家的成果、重新分裂，所以要「连续两次读到同一份不合法内容」并且预算
  *  用完，才认定它是真的坏了。预算用完内容还在变（并发进程在反复动它）就不等了，直接放弃。
- *  慢 IO（Wine / 网络卷）下这个预算是同步阻塞，可用 LIBMSSDK_IDENTITY_READ_BUDGET_MS 调小。 */
+ *  这段时间里赢家若在预算内没写完，会被误判成损坏。慢 IO（Wine / 网络卷）下可用
+ *  LIBMSSDK_IDENTITY_READ_BUDGET_MS 调大来压低误判，代价是降级路径同步阻塞更久。 */
 const DEFAULT_READ_BUDGET_MS = 1000
 const READ_POLL_MS = 5
 
@@ -56,14 +56,6 @@ function stateDir() {
 
 export function identityFile(dir = stateDir()) {
     return path.join(dir, IDENTITY_FILE_NAME)
-}
-
-/** 告警里的目录：把家目录折成 ~，别让用户名连同整段本机路径被贴进 issue。
- *  fs 错误只取 error.code（message 里的路径可能是 8.3 短名，折不动）。 */
-function redactDir(dir) {
-    const home = os.homedir()
-    if (home && dir.startsWith(home)) return `~${dir.slice(home.length)}`
-    return dir
 }
 
 /** 设备号格式与官方客户端一致：16 位数字，首位 1-8。 */
@@ -214,7 +206,7 @@ export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = default
     try {
         fs.mkdirSync(dir, { recursive: true })
     } catch (error) {
-        return giveUp('state-dir-unusable', `身份目录建不出来，本次只在内存里保留设备号：${redactDir(dir)}（${error.code}）`)
+        return giveUp('state-dir-unusable', '身份目录建不出来，本次只在内存里保留设备号（' + error.code + '）：检查 LIBMSSDK_STATE_DIR 或默认 data 目录是否可写')
     }
 
     // 一轮 = 一次独占创建尝试。退到下一轮只有三种来路：文件被人挪走了、刚挪走坏文件、
