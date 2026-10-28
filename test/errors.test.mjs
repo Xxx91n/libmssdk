@@ -8,7 +8,7 @@ import { BUSY_RETRY_AFTER_SECONDS, ERROR_KINDS, classify, failureResponse, retry
 
 const NOW = 1_789_000_000_000
 
-test('映射覆盖成功与每一类失败（含 502 不再是任何情况的出口）', () => {
+test('映射覆盖成功与每一类失败（正向落点集合里没有 502）', () => {
     const expected = {
         [ERROR_KINDS.SUCCESS]: { status: 200, code: null, retryAfterSeconds: null },
         [ERROR_KINDS.INVALID_REQUEST]: { status: 400, code: 'INVALID_REQUEST', retryAfterSeconds: null },
@@ -20,15 +20,20 @@ test('映射覆盖成功与每一类失败（含 502 不再是任何情况的出
     }
     assert.deepEqual(Object.keys(expected).sort(), Object.values(ERROR_KINDS).sort(), '映射表要覆盖每一种情况')
 
+    const args = { retryAtMs: NOW + 3000, nowMs: NOW }
     const statuses = new Set()
     for (const [kind, want] of Object.entries(expected)) {
-        const got = classify(kind, { retryAtMs: NOW + 3000, nowMs: NOW })
-        assert.deepEqual(got, want, `分类 ${kind}`)
-        statuses.add(got.status)
+        assert.deepEqual(classify(kind, args), want, `分类 ${kind}`)
+
+        const { status, headers, body } = failureResponse(kind, { message: '不行', ...args })
+        assert.equal(status, want.status, `${kind} 写出的状态码`)
+        assert.equal(body.code, want.code, `${kind} 写出的原因码`)
+        assert.equal('Retry-After' in headers, want.retryAfterSeconds !== null, `${kind} 的响应头`)
+        assert.equal(body.retry_after_seconds, want.retryAfterSeconds ?? undefined, `${kind} 的响应体`)
+        statuses.add(status)
     }
-    statuses.add(classify('没听过的原因').status)
-    assert.ok(!statuses.has(502), '502 不能是任何情况的出口')
-    assert.deepEqual([...statuses].sort((a, b) => a - b), [200, 400, 401, 429, 500, 503])
+    statuses.add(classify('没听过的原因', args).status)
+    assert.deepEqual([...statuses].sort((left, right) => left - right), [200, 400, 401, 429, 500, 503])
 })
 
 test('只有「服务忙」与「被限流」带等待时长，其余都不带', () => {
@@ -103,12 +108,14 @@ test('不带等待时长的情况，响应头和响应体都没有它', () => {
 })
 
 test('未知原因的默认落点是内部错误：500、不带时长、不冒充可重试', () => {
-    for (const kind of [undefined, null, '', 'signer BlewUp', 42]) {
+    const unknown = [undefined, null, '', 42, 'signer BlewUp', 'DEFAULT', '__proto__', 'constructor', 'toString', 'hasOwnProperty']
+    for (const kind of unknown) {
         assert.deepEqual(classify(kind, { retryAtMs: NOW + 9000, nowMs: NOW }), {
             status: 500,
             code: 'INTERNAL_ERROR',
             retryAfterSeconds: null,
-        })
+        }, `原因 ${String(kind)}`)
+        assert.equal(failureResponse(kind, { message: '炸了', retryAtMs: NOW + 9000, nowMs: NOW }).status, 500)
     }
 })
 

@@ -1,7 +1,7 @@
 // 错误分类：按「调用方下一步做什么」切开失败，而不是按内部异常命名。
 //
 // 只有两类失败是「等一会儿会好」——被限流、服务忙；其余都必须有人改请求或改机器，
-// 所以只有它们带等待时长。502（网关收到无效上游响应）在这里不成立：本进程既不是
+// 所以只有它们带等待时长。502（网关从上游收到无效响应）在这里不成立：本进程既不是
 // 网关也没有上游，任何情况都不落到它。
 //
 // 时间不做成接缝：需要当前时刻的地方把它当参数传进纯函数，定时器只负责用当前时间去调。
@@ -20,7 +20,7 @@ export const ERROR_KINDS = {
 /** 服务忙固定等多久（秒）：槽位自己会腾出来，不需要调用方算。 */
 export const BUSY_RETRY_AFTER_SECONDS = 1
 
-/** 拿不到「下次可请求时刻」时的兜底，也是契约规定的最小值。 */
+/** 本票规定的最小值：时刻正好、甚至已经过期，都不能回 0 秒。 */
 const MIN_RETRY_AFTER_SECONDS = 1
 
 const WAIT_NONE = 'none'
@@ -35,9 +35,11 @@ const TABLE = {
     [ERROR_KINDS.RATE_LIMITED]: { status: 429, code: ERROR_KINDS.RATE_LIMITED, wait: WAIT_FROM_CALLER },
     [ERROR_KINDS.BUSY]: { status: 503, code: ERROR_KINDS.BUSY, wait: WAIT_FIXED },
     [ERROR_KINDS.SIGNER_UNAVAILABLE]: { status: 500, code: ERROR_KINDS.SIGNER_UNAVAILABLE, wait: WAIT_NONE },
-    // 认不出来的原因一律按「必须有人来修」处理：不催调用方重试，也不冒充能重试。
-    default: { status: 500, code: ERROR_KINDS.INTERNAL_ERROR, wait: WAIT_NONE },
+    [ERROR_KINDS.INTERNAL_ERROR]: { status: 500, code: ERROR_KINDS.INTERNAL_ERROR, wait: WAIT_NONE },
 }
+
+/** 认不出来的原因一律按「必须有人来修」处理：不催调用方重试，也不冒充成能重试。 */
+const UNKNOWN = TABLE[ERROR_KINDS.INTERNAL_ERROR]
 
 /**
  * 下次可请求的精确时刻 → 整数秒：向上取整、最少 1 秒。
@@ -52,7 +54,9 @@ export function retryAfterFromInstant(retryAtMs, nowMs = Date.now()) {
 
 /** 分类一个失败：状态码、稳定原因码、以及有没有等待时长。 */
 export function classify(kind, { retryAtMs, nowMs = Date.now() } = {}) {
-    const entry = TABLE[kind] || TABLE.default
+    // 必须挡掉原型链上的键：'constructor' / '__proto__' 也是字符串，
+    // 而 TABLE[kind] 会拿到一个真值，把上面的默认落点绕过去。
+    const entry = Object.hasOwn(TABLE, kind) ? TABLE[kind] : UNKNOWN
     let retryAfterSeconds = null
     if (entry.wait === WAIT_FIXED) retryAfterSeconds = BUSY_RETRY_AFTER_SECONDS
     else if (entry.wait === WAIT_FROM_CALLER) retryAfterSeconds = retryAfterFromInstant(retryAtMs, nowMs)
@@ -60,22 +64,20 @@ export function classify(kind, { retryAtMs, nowMs = Date.now() } = {}) {
 }
 
 /**
- * 一次失败的完整回包形状。
+ * 一次失败的回包：状态码、响应头、响应体。
  *
- * 等待时长在响应头与响应体各写一份：头是中间件唯一能读到的地方，体是客户端
- * 拿不到头时的兜底，两处必须是同一个整数。
+ * 等待时长在头和体各写一份：头是中间件唯一能读到的地方，体是头支持不一致时的兜底，
+ * 两处必须是同一个整数。响应自己的框架（Content-Type / Content-Length）仍归写出路径。
  *
- * @param kind 见 {@link ERROR_KINDS}
- * @param message 人读的失败原因
- * @param details 平级扩展字段（哪个参数错了之类），客户端可以忽略不认识的东西
+ * `details` 是平级扩展字段（哪个参数错了之类），客户端可以忽略不认识的东西。
  */
-export function failureResponse(kind, { message, details, retryAtMs, nowMs = Date.now() } = {}) {
+export function failureResponse(kind, { message, details, retryAtMs, nowMs } = {}) {
     const { status, code, retryAfterSeconds } = classify(kind, { retryAtMs, nowMs })
-    const body = { ...details, ok: false, error: message == null ? code : String(message), code }
-    const headers = { 'Content-Type': 'application/json; charset=utf-8' }
+    const headers = {}
+    const body = { ...details, ok: false, error: message, code }
     if (retryAfterSeconds !== null) {
-        body.retry_after_seconds = retryAfterSeconds
         headers['Retry-After'] = String(retryAfterSeconds)
+        body.retry_after_seconds = retryAfterSeconds
     }
     return { status, headers, body }
 }
