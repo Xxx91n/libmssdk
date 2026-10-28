@@ -9,14 +9,16 @@ import { BUSY_RETRY_AFTER_SECONDS, ERROR_KINDS, classify, failureResponse, retry
 const NOW = 1_789_000_000_000
 
 test('映射覆盖成功与每一类失败（正向落点集合里没有 502）', () => {
+    // 键和值都按字面量写：这张 expected 才是独立对照，kind 多一个少一个都会红；
+    // 照抄 ERROR_KINDS 的话它就只剩「改了表忘了改测试」这一层作用。
     const expected = {
-        [ERROR_KINDS.SUCCESS]: { status: 200, code: null, retryAfterSeconds: null },
-        [ERROR_KINDS.INVALID_REQUEST]: { status: 400, code: 'INVALID_REQUEST', retryAfterSeconds: null },
-        [ERROR_KINDS.UNAUTHORIZED]: { status: 401, code: 'UNAUTHORIZED', retryAfterSeconds: null },
-        [ERROR_KINDS.RATE_LIMITED]: { status: 429, code: 'RATE_LIMITED', retryAfterSeconds: 3 },
-        [ERROR_KINDS.BUSY]: { status: 503, code: 'BUSY', retryAfterSeconds: BUSY_RETRY_AFTER_SECONDS },
-        [ERROR_KINDS.SIGNER_UNAVAILABLE]: { status: 500, code: 'SIGNER_UNAVAILABLE', retryAfterSeconds: null },
-        [ERROR_KINDS.INTERNAL_ERROR]: { status: 500, code: 'INTERNAL_ERROR', retryAfterSeconds: null },
+        SUCCESS: { status: 200, code: null, retryAfterSeconds: null },
+        INVALID_REQUEST: { status: 400, code: 'INVALID_REQUEST', retryAfterSeconds: null },
+        UNAUTHORIZED: { status: 401, code: 'UNAUTHORIZED', retryAfterSeconds: null },
+        RATE_LIMITED: { status: 429, code: 'RATE_LIMITED', retryAfterSeconds: 3 },
+        BUSY: { status: 503, code: 'BUSY', retryAfterSeconds: BUSY_RETRY_AFTER_SECONDS },
+        SIGNER_UNAVAILABLE: { status: 500, code: 'SIGNER_UNAVAILABLE', retryAfterSeconds: null },
+        INTERNAL_ERROR: { status: 500, code: 'INTERNAL_ERROR', retryAfterSeconds: null },
     }
     assert.deepEqual(Object.keys(expected).sort(), Object.values(ERROR_KINDS).sort(), '映射表要覆盖每一种情况')
 
@@ -24,16 +26,36 @@ test('映射覆盖成功与每一类失败（正向落点集合里没有 502）'
     const statuses = new Set()
     for (const [kind, want] of Object.entries(expected)) {
         assert.deepEqual(classify(kind, args), want, `分类 ${kind}`)
+        statuses.add(want.status)
+        if (want.status === 200) continue // 成功不经过失败回包，见下一条用例
 
         const { status, headers, body } = failureResponse(kind, { message: '不行', ...args })
         assert.equal(status, want.status, `${kind} 写出的状态码`)
         assert.equal(body.code, want.code, `${kind} 写出的原因码`)
         assert.equal('Retry-After' in headers, want.retryAfterSeconds !== null, `${kind} 的响应头`)
         assert.equal(body.retry_after_seconds, want.retryAfterSeconds ?? undefined, `${kind} 的响应体`)
-        statuses.add(status)
     }
     statuses.add(classify('没听过的原因', args).status)
     assert.deepEqual([...statuses].sort((left, right) => left - right), [200, 400, 401, 429, 500, 503])
+})
+
+test('成功不走失败回包：拿 SUCCESS 来要回包，也不会得到一个不带签名的 200', () => {
+    assert.deepEqual(classify(ERROR_KINDS.SUCCESS, { nowMs: NOW }), { status: 200, code: null, retryAfterSeconds: null })
+
+    const { status, headers, body } = failureResponse(ERROR_KINDS.SUCCESS, { message: '不该是 200', nowMs: NOW })
+    assert.equal(status, 500)
+    assert.equal(body.code, 'INTERNAL_ERROR')
+    assert.ok(!('Retry-After' in headers))
+})
+
+test('秒数只由传进来的两个时刻算出，模块自己不读墙上时钟', () => {
+    assert.equal(retryAfterFromInstant(4000, 0), 4)
+    assert.equal(retryAfterFromInstant(1e15, 0), 1e12)
+
+    // 漏传 nowMs 只能退到最小 1 秒。这里要是跳出 998300000 之类的大数，就说明有人把
+    // nowMs 默认回了 Date.now()——时间又变回藏在函数里的接缝，调用方漏传也不会报错。
+    assert.equal(retryAfterFromInstant(1e15), 1)
+    assert.equal(classify(ERROR_KINDS.RATE_LIMITED, { retryAtMs: 1e15 }).retryAfterSeconds, 1)
 })
 
 test('只有「服务忙」与「被限流」带等待时长，其余都不带', () => {
