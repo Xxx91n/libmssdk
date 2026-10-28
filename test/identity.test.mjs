@@ -128,8 +128,16 @@ test(`${PROCESS_COUNT} 个进程同时首次启动 ${ROUNDS} 轮：设备号始�
             const stored = readStoredIdentity(dir)
             assert.equal(stored.device_id, results[0].deviceId, `第 ${round} 轮磁盘上的设备号和进程读到的不一致${seen}`)
             assert.equal(stored.fp, stored.device_id, `第 ${round} 轮 fp 没跟 device_id 成套${seen}`)
-            // 没有临时文件、没有 .corrupt、没有第二份：目录里就只有那一个身份文件
-            assert.deepEqual(fs.readdirSync(dir), ['identity.json'], `第 ${round} 轮状态目录里不止一个文件${seen}`)
+            // 目录里不该出现第二个身份文件，也不该出现「临时文件改名」留下的那种名字。
+            // identity.json.corrupt 允许出现：那说明某个创建者超过 1 秒没写完盘，
+            // 别人按规则把它当成坏文件挪走了 —— 是抖动的痕迹，不是分裂。
+            const files = fs.readdirSync(dir).sort()
+            assert.deepEqual(
+                files.filter(name => name !== 'identity.json' && name !== 'identity.json.corrupt'),
+                [],
+                `第 ${round} 轮状态目录里出现了计划外的文件：${JSON.stringify(files)}${seen}`,
+            )
+            assert.equal(files.filter(name => name === 'identity.json').length, 1, `第 ${round} 轮不止一份身份文件${seen}`)
         } finally {
             fs.rmSync(dir, { recursive: true, force: true })
         }

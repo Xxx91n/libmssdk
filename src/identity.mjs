@@ -6,8 +6,10 @@
 // 这里用 open(..., 'wx')：内核保证同一路径只有一个创建者能成功，输的一方拿到 EEXIST
 // 之后回头读赢家的值。
 //
-// 写入只有一个入口 prepareStoredIdentity()，主进程在拉起任何 worker 之前调用它；
-// worker 侧只用 readStoredIdentity()，那条路径上没有任何创建或改写的代码。
+// 写入只有一个入口 prepareStoredIdentity()：今天每个入口命令（serve / bridge / selftest /
+// probe / config）都会在进程启动时调它，所以「只有一个写入者」靠的是独占创建本身 ——
+// 无论哪个进程赢，磁盘上都只有一份。将来 worker 池落地后，worker 侧改用
+// readStoredIdentity()，那条路径上没有任何创建或改写的代码。
 
 import crypto from 'node:crypto'
 import fs from 'node:fs'
@@ -33,7 +35,7 @@ const CREATE_ATTEMPTS = 3
 const DEFAULT_READ_BUDGET_MS = 1000
 const READ_POLL_MS = 5
 
-/** 写完回读核对的次数：读不动多半是几毫秒的抖动（EMFILE、杀软占用），重试一次就过去了。 */
+/** 写完回读核对的次数：读不动多半是几毫秒的抖动（EMFILE、杀软占用），多读两轮就过去了。 */
 const READBACK_POLLS = 3
 
 /** 身份文件目录：默认 <仓库>/data，可用 LIBMSSDK_STATE_DIR 改到别处。 */
@@ -100,6 +102,11 @@ function inspectIdentityFile(dir) {
     return identity ? { status: 'valid', identity } : { status: 'invalid', raw }
 }
 
+/** 两次观察是不是同一份东西：状态加上原文一起比，内容变了就不算「稳定」。 */
+function fingerprint(found) {
+    return `${found.status}:${found.raw ?? ''}`
+}
+
 /** 独占创建 + 回读核对，返回 created / unconfirmed / exists / failed 四种结果之一。 */
 function createIdentityFile(dir) {
     const file = identityFile(dir)
@@ -164,10 +171,10 @@ function sleep(ms) {
 }
 
 /**
- * 主进程在拉起任何 worker 之前调用：读到就用，读不到就独占生成。
+ * 进程启动时调用（worker 侧改用 readStoredIdentity）：读到就用，读不到就独占生成。
  *
  * 返回值里 created 表示「这份值是本次生成的」，persisted 表示「这份值已经在身份文件上」。
- * persisted 为 false 时 state 目录不可写或不可修，设备号只在内存里，重启会变。
+ * persisted 为 false 时 state 目录不可用或不可修，设备号只在内存里，重启会变，并留一条告警。
  */
 export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = DEFAULT_READ_BUDGET_MS, log = logEvent } = {}) {
     const warn = (reason, message) => log('identity', { level: 'warn', reason, message })
@@ -184,7 +191,8 @@ export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = DEFAULT
         return giveUp('state-dir-unusable', `身份目录建不出来，本次只在内存里保留设备号：${dir}（${error.message}）`)
     }
 
-    // 一轮 = 一次独占创建尝试。只有「读到的是不合法内容、而且这份内容不再变化」才会退到下一轮。
+    // 一轮 = 一次独占创建尝试。退到下一轮只有三种来路：文件被人挪走了、刚挪走坏文件、
+    // 或者坏文件在两次观察之间又变了。其余情况都直接返回。
     for (let attempt = 0; attempt < CREATE_ATTEMPTS; attempt += 1) {
         const created = createIdentityFile(dir)
         if (created.status === 'created') return { identity: created.identity, created: true, persisted: true }
@@ -213,7 +221,7 @@ export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = DEFAULT
                 return giveUp('churning', `身份文件在 ${readBudgetMs * 2}ms 里一直在变，判不出是没写完还是坏了，本次只在内存里保留设备号`)
             }
             // 判「坏」要连续两次读到同一份内容：内容还在变说明有人在写，这时候挪走它就会分裂。
-            const seen = `${found.status}:${found.raw ?? ''}`
+            const seen = fingerprint(found)
             if (seen === lastSeen && now >= settleAt) {
                 if (found.status === 'unreadable') {
                     return giveUp('unreadable', `身份文件读不动，本次只在内存里保留设备号：${found.error.message}`)
@@ -222,7 +230,7 @@ export function prepareStoredIdentity({ dir = stateDir(), readBudgetMs = DEFAULT
                 // 这一眼把「以为坏了、其实已经写好」的窗口压到一次读的长度。
                 const latest = inspectIdentityFile(dir)
                 if (latest.status === 'valid') return { identity: latest.identity, created: false, persisted: true }
-                if (latest.status !== 'invalid' || `${latest.status}:${latest.raw ?? ''}` !== seen) break
+                if (latest.status !== 'invalid' || fingerprint(latest) !== seen) break
                 if (!retireCorruptIdentity(dir)) {
                     return giveUp('stuck', '身份文件内容不合法而且挪不动（可能被占用），本次只在内存里保留设备号')
                 }

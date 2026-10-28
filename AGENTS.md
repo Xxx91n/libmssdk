@@ -35,8 +35,9 @@ deploy/README.md     Docker 部署
 2. **签名覆盖 URL + 全部请求头**：`/sign` 收到的 headers 必须是调用方真实发送的一份。
 3. **`x-ss-stub` 是 body 的 MD5 大写**，既是签名输入，也要随请求发送。
 4. **设备成套**：`device_id` / `iid` / `fp` 必须与 `bdms.init({ deviceId })` 一致。
-5. **身份只有一个写入者**：`identity.json` 由主进程在拉起任何 worker 之前用独占创建
-   （`open` 带 `wx`）准备好，worker 侧只允许 `readStoredIdentity()`。
+5. **身份只有一个写入口**：写 `identity.json` 只能走 `src/identity.mjs` 的
+   `prepareStoredIdentity()`（`open` 带 `wx` 独占创建，输的一方回读赢家的值），
+   worker 侧用只读的 `readStoredIdentity()`。
    不要新增「先探测再写入」或「临时文件改名」这两类写法——它们都不保证只生成一次。
 6. **空响应不代表接口故障**：签名不符时服务端可能返回 HTTP 200 + 0 bytes。
    是否成功必须用 `/probe` 的 `fullTrack` 判定。
