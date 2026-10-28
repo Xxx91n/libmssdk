@@ -23,6 +23,7 @@ src/probe.mjs        track_v2 真机自检和整曲 / 试听判定
 src/server.mjs       HTTP 路由
 src/index.mjs        CLI：serve / bridge / selftest / probe / config
 test/                使用 mock-bdms 的离线测试
+verify/wine-multi/   手动验证：Docker + Wine 下多进程（不进 npm test，也不进 CI）
 docs/CONTRACT.md     服务契约
 docs/DEPLOY-WINDOWS.md Windows 部署
 deploy/README.md     Docker 部署

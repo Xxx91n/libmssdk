@@ -1,0 +1,105 @@
+# verify/wine-multi —— Docker + Wine 多进程验证
+
+一条命令回答一个问题：**同一个容器、同一个 `WINEPREFIX`、同一份 `identity.json`、同一份
+`bdms.node`，两个 `serve` 进程能不能同时工作**（[sodahub-org/libmssdk#6](https://github.com/sodahub-org/libmssdk/issues/6)）。
+
+它是**手动执行**的验证脚本，不进 `npm test`、不进 CI —— 因为它要用户自备的官方二进制和真实凭据。
+
+## 一条命令
+
+```bash
+# 真环境：Linux / WSL + Docker，自备原生模块；要打上游判据就给 track_id 与 cookie
+bash verify/wine-multi/run.sh --track <track_id> --env-file /tmp/libmssdk-verify.env
+
+# 没有 Docker、没有凭据：先把判定流水线彩排一遍
+bash verify/wine-multi/run.sh --mode mock
+```
+
+退出码：`0` 通过 / `1` 失败 / `2` 部分完成（有判据没执行，例如没给 `--track`）/ `3` 用法错。
+结果 JSON 落在 `results/`（被 `.gitignore` 挡住）。
+
+## 测什么
+
+| 判据 | 外部可见事实 | 挂了会归成哪种形态 |
+| --- | --- | --- |
+| 1 两个进程同时签名 | 两边 `/sign` 都出 `X-Helios` / `X-Medusa` | 进程起不来 |
+| 2 各自签的头各打一次上游 | 上游回包非空且能解析成曲目 | 签名能出但上游不接受 |
+| 3 连打 N 轮 | 每轮两边各签一次（有 cookie 时各打一次上游） | 上面两种 |
+| 4 杀掉一个，另一个继续服务 | 存活方仍出签名 | 一个进程把共享 prefix 拖垮 |
+| 5 两个进程共用同一份身份 | 两个 `/healthz` 的脱敏设备号彼此相同且等于身份文件 | 单列发现（device_id 分裂属 #2） |
+| 6 输出与日志不泄露 | 扫 serve 自己的日志与结果文件，找 cookie / 签名值 / 完整设备号 | 脱敏失败 |
+
+三种失败形态靠**可观察特征**区分，不靠猜：
+
+* **进程起不来** —— `/healthz` 连不上且该进程的 pid 已退出，`stderr` 有内容。
+* **签名能出但上游不接受** —— `/sign` 回 200 且两个头都在，上游是 `HTTP 200 + 0 字节`（官方对签名不符的真实形态）或非 200。
+* **一个进程把共享 prefix 拖垮** —— 同一时间窗内两个端口一起失败，或杀掉一个之后另一个不再应答而它自己的 pid 还活着、`stderr` 安静。
+
+## 前置条件
+
+1. **Docker**（Linux 或 WSL2）与一个 x86_64 主机；ARM 上要 QEMU 模拟，很慢。
+2. **自备官方二进制**：`bdms.node` + `metasecml.dll`，默认从 `vendor/soda-music/` 取，
+   也可 `--client-dir` 指向你自己的汽水版本目录。仓库不含也不分发它们。
+3. **要打真实上游才需要 cookie**：`--env-file` 指一个 600 权限的文件，里面写
+   `LIBMSSDK_COOKIE=…`。它只 `source` 给宿主侧的 harness 进程，**不进镜像、不进容器环境、
+   不进 `docker inspect`、不进结果文件**。
+4. **一个 `track_id`**：用本机实际播放过的曲子最能说明问题。
+5. 首次构建镜像需要能访问 `dl.winehq.org` 与 `nodejs.org`（约 3–5 分钟）。
+
+镜像与卷：默认用 `deploy/Dockerfile` 构建 `libmssdk:local`，身份与 Wine prefix 各用一个命名卷。
+`--skip-build --image <已有 tag>` 复用镜像，`--data-volume` / `--wine-volume` 复用已有的身份与 prefix。
+
+## 已知的环境坑（跟产品无关，但会把复现带偏）
+
+1. **不要把 `bdms.node` 放在 `/mnt/*` 这类 drvfs 绑定挂载里加载。** 实测：Wine 在 `DllMain`
+   里访问违例（读模块基址 + 偏移），该模块自己的异常处理器无限重入直到打穿栈，并**一直握着
+   Wine 的 loader 锁**，于是同 prefix 下所有进程一起卡住（90 秒不返回、CPU 近似空转）。
+   所以 `run.sh` 用 `docker cp` 把两个二进制放进容器自己的文件系统。换 Wine 版本不解决——
+   是挂载路径的问题，不是 Wine 版本或多实例的问题。
+2. **`docker exec`（不加 `-t`）不能把 `wine node.exe` 直接接在管道上**，会 `open EBADF`：
+   Wine 下的 Node 打不开管道型 stdio。加 `-t` 能跑，但 TTY 会在 80 列插换行，多行 JSON 被切断。
+   脚本的做法是容器内 bash 把输出重定向到文件再 `cat` 出来（见 `driver-docker.mjs` 的 `wineNode`）。
+3. **`--skip-build` 测的是镜像里的 `src`**。改过 `src/` 就要去掉 `--skip-build` 重新构建，
+   否则测的是旧代码。
+4. **身份先落盘，再拉起进程。** `container-entry.sh` 先跑一次 `config` 把 `identity.json` 写好。
+   否则两个进程同时首次生成会分裂出两个 `device_id`（实测约 8%）——那是 #2 的范围，
+   本验证不测这个竞态，只在判据 5 里检查两个进程读到的是不是同一份。
+5. **判据 4 杀的是 `wine` 包装进程**，容器内 `node.exe` 与 `wineserver` 的计数作为辅助证据
+   一起写进结果（`observations.processesAfterKill`）。
+6. 到 `dl.winehq.org` 的 IPv6 不通的机器上构建会卡在 `curl`；用 `--skip-build --image <tag>`
+   复用已有镜像，或按自己的网络另备一份 Dockerfile。
+
+## 彩排模式（`--mode mock`）证明什么、不证明什么
+
+本机起两个**真 `serve` 进程**（跑 `src/index.mjs serve`），签名模块用仓库自带的
+`test/fixtures/mock-bdms.mjs`，上游是 `127.0.0.1` 上的假 `track_v2`——缺签名头或 `x-ss-stub`
+与 body 的 MD5 不符时，按官方形态回 `200 + 0 字节`。
+
+* **证明**：判据流水线本身、三种失败形态的判定、输出脱敏（cookie 是随机哨兵串，
+  结果文件与服务日志里都必须找不到它）。
+* **不证明**：Wine 的行为、真实 `bdms.node`、真实上游。
+
+注入失败形态：`--scenario ok | process-start | upstream-reject | prefix-contention`。
+最后一种用 `SIGSTOP` 复现「pid 还在、不应答、stderr 安静」的卡死形态，需要 Linux/WSL。
+
+## 敏感边界
+
+* cookie 只在宿主进程的环境里；容器与镜像里都没有它。
+* 签名值只记长度；设备号只以 `123***456` 形式出现；`results/` 与 `logs/` 不入库。
+* 结果文件里若混进敏感值，脚本拒绝写盘并以 `1` 退出（判据 6 同时扫服务自己的日志）。
+
+## 文件
+
+| 文件 | 作用 |
+| --- | --- |
+| `run.sh` | 一条命令：镜像 / 容器 / 二进制进容器 / 跑 harness / 收尾 |
+| `container-entry.sh` | 容器入口：同一个 prefix 起 N 个 `serve`，日志落文件 |
+| `harness.mjs` | 判据流水线、失败形态判定、结论与脱敏 |
+| `driver-docker.mjs` | 真环境控制面：`docker exec` 读日志、探活、杀进程、记版本 |
+| `driver-mock.mjs` | 彩排控制面：本机两个 serve + 假上游 + 故障注入 |
+
+## 这些数字只是参照
+
+一台 8 逻辑核机器上的量级观察：热态单次签名几十到一百多毫秒，Wine prefix 首启 20–40 秒，
+`init` 之后一小段窗口内可能出短签名、之后长度稳定。**绝对值换机器要重测**，脚本只记录
+观察到的长度，不拿它们当门禁——写死长度会让这台机器永远不就绪。
