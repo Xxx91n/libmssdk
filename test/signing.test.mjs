@@ -104,6 +104,24 @@ test('summarizeTrackV2Response 区分整曲与试听', () => {
     assert.match(preview.hint, /空响应/)
 })
 
+test('试听的提示不再把设备号列成原因（#10 实测：换设备号形状结果不变）', () => {
+    const previewOnly = summarizeTrackV2Response(
+        JSON.stringify({
+            track: { id: '1', name: '试听级', duration: 278507 },
+            track_player: {
+                video_model: JSON.stringify({
+                    video_duration: 60,
+                    video_list: [{ gear_des_key: '0:M4A|5:higher', video_meta: { quality: 'higher', bitrate: 132180, size: 3061783 } }],
+                }),
+            },
+        }),
+        '1',
+    )
+    assert.equal(previewOnly.fullTrack, false)
+    assert.match(previewOnly.hint, /试听级/)
+    assert.ok(!/设备指纹不匹配/.test(previewOnly.hint), `提示里不该再有设备指纹归因：${previewOnly.hint}`)
+})
+
 test('POST /sign 返回 X-Helios / X-Medusa（含鉴权）', async () => {
     const unauthorized = await fetch(`${baseUrl}/sign`, {
         method: 'POST',
