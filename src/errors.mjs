@@ -1,9 +1,10 @@
 // 错误分类：按「调用方下一步做什么」切开失败，而不是按内部异常命名。
 //
 // 只有两类失败是「等一会儿会好」——被限流、服务忙；其余都必须有人改请求或改机器，
-// 所以只有它们带等待时长。502（网关从上游收到无效响应）不在分类表里：本进程不是网关，
-// 签名失败也不是上游给的无效响应。今天还在打上游的是 `/probe`（server.mjs），它自己那条
-// 502 要等 #9 把它收成命令行子命令时才消失，本表不给它分配出口。
+// 所以只有它们带等待时长。502（网关从上游收到无效响应）不在分类表里：本进程不是网关。
+// 今天 `server.mjs` 还有两处真在发 502，都不由本表负责收口：签名失败走 `:188` 的
+// `signer_error`（要换成 500 SIGNER_UNAVAILABLE，属 #7 的切换），`/probe` 的非 200 上游
+// 响应走 `:161`（那端点要收成命令行子命令，属 #9）。切换之前它们照旧。
 //
 // 时间不做成接缝：需要的地方把当前时刻当参数传进来，定时器只负责用当前时间去调；
 // 本模块自己不读墙上时钟，所以同一组入参永远算出同一个秒数。
@@ -55,7 +56,7 @@ export function retryAfterFromInstant(retryAtMs, nowMs) {
     return Math.max(MIN_RETRY_AFTER_SECONDS, Math.ceil(waitMs / 1000))
 }
 
-/** 分类一个失败：状态码、稳定原因码、以及有没有等待时长。 */
+/** 分类一种情况：状态码、稳定原因码、以及有没有等待时长。成功那一行也在这张表里。 */
 export function classify(kind, { retryAtMs, nowMs } = {}) {
     // 必须挡掉原型链上的键：'constructor' / '__proto__' 也是字符串，
     // 而 TABLE[kind] 会拿到一个真值，把上面的默认落点绕过去。
@@ -75,12 +76,12 @@ export function classify(kind, { retryAtMs, nowMs } = {}) {
  * `details` 是平级扩展字段（哪个参数错了之类），客户端可以忽略不认识的东西。
  */
 export function failureResponse(kind, { message, details, retryAtMs, nowMs } = {}) {
-    const time = { retryAtMs, nowMs }
-    const classified = classify(kind, time)
-    // 成功不是失败：拿 SUCCESS 来要失败回包说明接线接错了。按默认落点出去，绝不能回一个
-    // 不带签名的 200——客户端会把 200 当成可用签名继续发，症状是静默降级成试听片段。
-    const { status, code, retryAfterSeconds } =
-        classified.status === 200 ? classify(ERROR_KINDS.INTERNAL_ERROR, time) : classified
+    // 成功不是失败：拿 SUCCESS 来要失败回包说明接线接错了。按默认落点走 500 INTERNAL_ERROR，
+    // 绝不能回一个不带签名的 200——客户端会把 200 当成可用签名继续发，症状是静默降级成试听片段。
+    const { status, code, retryAfterSeconds } = classify(
+        kind === ERROR_KINDS.SUCCESS ? ERROR_KINDS.INTERNAL_ERROR : kind,
+        { retryAtMs, nowMs },
+    )
     const headers = {}
     const body = { ...details, ok: false, error: message, code }
     // 扩展字段不许夹带等待时长：头和体只由这一次分类说了算，否则「其余不带」会被绕过。
