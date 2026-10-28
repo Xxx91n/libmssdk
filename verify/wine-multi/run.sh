@@ -121,6 +121,7 @@ if [[ -n "$ENVFILE" ]]; then
     read_env_value() {
         local want=$1 line name value
         while IFS= read -r line || [[ -n "$line" ]]; do
+            line=${line%$'\r'}    # 环境文件在 Windows 上编辑过就是 CRLF，带个 \r 会把 cookie 弄坏
             name=${line%%=*}
             value=${line#*=}
             [[ "$name" == "$want" ]] || continue
