@@ -225,10 +225,12 @@ async function signOn(portIndex, { url, method = 'POST', body = '', headers, dev
         let payload
         try {
             payload = JSON.parse(text)
-        } catch (error) {
+        } catch {
             // 200 但回包不是 JSON：进程在答话，只是答得不对，不能算「起不来」。
-            // 这里不带正文片段——还没解析成功，签名值来不及登记为敏感，正文一律不落盘
-            const wrapped = new Error(`/sign 回包不是 JSON（${Buffer.byteLength(text)} 字节，正文不记录）：${String(error.message).slice(0, 80)}`)
+            // 连 JSON.parse 的报错文本都不留——Node 会把正文前缀抄进 message
+            // （实测：Unexpected token 'e', "eyJIZWxpb3"... is not valid JSON），
+            // 而此刻签名值还没登记为敏感，脱敏拦不住它
+            const wrapped = new Error(`/sign 回包不是 JSON（${Buffer.byteLength(text)} 字节，正文与解析错误均不记录）`)
             wrapped.served = true
             throw wrapped
         }
@@ -349,10 +351,11 @@ async function main() {
     let identity
     try {
         identity = JSON.parse(identityText)
-    } catch (error) {
+    } catch {
+        // 同样不带 JSON.parse 的报错文本：它会抄出身份文件的前缀，而设备号此刻还没登记为敏感
         report.verdict = 'INCOMPLETE'
-        report.criteria.identity = { status: 'BLOCKED', reason: '身份文件不是合法 JSON' }
-        say(`[verify] 身份文件不是合法 JSON：${redactor.sanitize('console', error.message)}`)
+        report.criteria.identity = { status: 'BLOCKED', reason: `身份文件不是合法 JSON（${Buffer.byteLength(identityText)} 字节，内容不记录）` }
+        say('[verify] 身份文件不是合法 JSON（正文与解析错误都不记录，避免带出设备号），验证无法继续。')
         printConclusion()
         return
     }
