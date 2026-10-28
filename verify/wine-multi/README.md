@@ -64,9 +64,9 @@ bash verify/wine-multi/run.sh --mode mock
 1. **Docker**（Linux 或 WSL2）与一个 x86_64 主机；ARM 上要 QEMU 模拟，很慢。
 2. **自备官方二进制**：`bdms.node` + `metasecml.dll`，默认从 `vendor/soda-music/` 取，
    也可 `--client-dir` 指向你自己的汽水版本目录。仓库不含也不分发它们。
-3. **要打真实上游才需要 cookie**：`--env-file` 指一个 600 权限的文件，里面写
-   `LIBMSSDK_COOKIE=…`。它只 `source` 给宿主侧的 harness 进程，**不进镜像、不进容器环境、
-   不进 `docker inspect`、不进结果文件**。
+3. **要打真实上游才需要 cookie**：`--env-file` 指一个 600 权限的文件，里面一行
+   `LIBMSSDK_COOKIE=<原始 cookie 串>`（带 `;` 和 `=` 原样写就行，脚本按行读取，**不做 `source` 求值**）。
+   它只传给宿主侧的 harness 进程，**不进镜像、不进容器环境变量、不出现在 `docker inspect`、不进结果文件**。
 4. **一个 `track_id`**：用本机实际播放过的曲子最能说明问题。
 5. 首次构建镜像需要能访问 `dl.winehq.org` 与 `nodejs.org`（约 3–5 分钟）。
 6. **宿主侧 Node ≥ 20.11**（harness 用到 `import.meta.dirname`）。容器里跑的是镜像钉住的

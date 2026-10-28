@@ -116,11 +116,31 @@ if [[ -n "$ENVFILE" ]]; then
     [[ -f "$ENVFILE" ]] || die "环境文件不存在：$ENVFILE"
     PERMS=$(stat -c '%a' "$ENVFILE" 2>/dev/null || echo unknown)
     [[ "$PERMS" == 600 || "$PERMS" == 400 ]] || echo "[verify] 提醒：$ENVFILE 权限是 $PERMS，建议 chmod 600" >&2
-    set -a
-    # shellcheck disable=SC1090
-    . "$ENVFILE"
-    set +a
-    echo '[verify] 已从环境文件读取变量（只给宿主侧进程，不进容器、不进 docker 配置）'
+    # 按行取值，绝不用 source：真实 cookie 里就带 `;` 和 `=`，交给 shell 求值等于
+    # 把 cookie 的一部分当命令执行
+    read_env_value() {
+        local want=$1 line name value
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            name=${line%%=*}
+            value=${line#*=}
+            [[ "$name" == "$want" ]] || continue
+            # 允许写成 KEY="…" / KEY='…' 的形式
+            if [[ ${value} == \"*\" ]]; then
+                value=${value:1:${#value}-2}
+            elif [[ ${value} == \'*\' ]]; then
+                value=${value:1:${#value}-2}
+            fi
+            printf '%s' "$value"
+            return 0
+        done < "$ENVFILE"
+        return 1
+    }
+    if COOKIE_FROM_FILE=$(read_env_value LIBMSSDK_COOKIE); then
+        export LIBMSSDK_COOKIE="$COOKIE_FROM_FILE"
+        echo "[verify] 从 $ENVFILE 读到 LIBMSSDK_COOKIE（${#LIBMSSDK_COOKIE} 字符；只给宿主侧进程，不进容器、不进 docker 配置）"
+    else
+        die "$ENVFILE 里没有 LIBMSSDK_COOKIE=… 这一行"
+    fi
 fi
 
 if [[ ! -f "$REPO_ROOT/$DOCKERFILE" ]]; then
