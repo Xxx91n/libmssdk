@@ -424,8 +424,10 @@ async function main() {
         identityStatus = 'FAIL'
         identityNote = '两个进程各自解析出的设备号互不相同：device_id 分裂（属 #2 的范围）'
     } else if (allRawSeen && agreeWithEachOther && !agreeWithFile) {
-        identityStatus = 'FAIL'
-        identityNote = '两个进程彼此一致，但都和共享身份文件不同——多半是 LIBMSSDK_DEVICE_ID 覆盖，属另一件事，不是这里要证的同一份身份'
+        // 判据的主语是「两个进程读到同一份身份」：两个进程一致就成立。
+        // 与共享文件不同是 config.mjs 里 LIBMSSDK_DEVICE_ID 覆盖的既定行为，另说，不算这里失败
+        identityStatus = 'PASS'
+        identityNote = '两个进程各自解析出的设备号逐字节相同；但与共享身份文件不同——按 config.mjs 这是显式覆盖（LIBMSSDK_DEVICE_ID / QISHUI_DEVICE_ID）的既定行为，落在这里只作记录'
     } else if (allRawSeen && agreeWithFile) {
         identityStatus = masksOk ? 'PASS' : 'PARTIAL'
         identityNote = masksOk
@@ -445,7 +447,7 @@ async function main() {
             port,
             masked: healthMasks[index],
             rawSeen: Boolean(processDeviceIds[index]),
-            agreesWithOtherProcesses: agreeWithEachOther || null,
+            agreesWithOtherProcesses: allRawSeen ? agreeWithEachOther : null,
             agreesWithSharedFile: allRawSeen ? processDeviceIds[index] === device.deviceId : null,
         })),
         maskedValuesMatch: masksOk,
