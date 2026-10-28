@@ -24,6 +24,7 @@ const {
     maskTrackId,
     queryEscape,
     runArm,
+    safeMessage,
 } = await import('../tools/entitlement-matrix.mjs')
 
 const FIXED_NOW = 1789435000000
@@ -158,6 +159,19 @@ test('captured 身份必须显式给设备号，缺了就报错而不是悄悄�
         fp: '5000000000000005',
         shape: 'captured',
     })
+})
+
+test('报错信息里的本机绝对路径会被换成文件名（日志要被人贴进票里）', () => {
+    const cases = [
+        'bdms.node 不存在：D:\\Users\\someone\\nope\\bdms.node',
+        'bdms.node 不存在：D:/Users/someone/nope/bdms.node',
+        'bdms.node 不存在：/home/someone/vendor/soda-music/bdms.node',
+    ]
+    for (const message of cases) {
+        const out = safeMessage(new Error(message))
+        assert.equal(out, 'bdms.node 不存在：bdms.node', `没剥掉路径：${out}`)
+    }
+    assert.equal(safeMessage(new Error('未找到 bdms.node：请设置 LIBMSSDK_CLIENT_DIR')), '未找到 bdms.node：请设置 LIBMSSDK_CLIENT_DIR')
 })
 
 test('读数不带曲名与完整曲目号，所以日志可以直接贴进票里', () => {

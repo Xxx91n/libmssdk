@@ -425,9 +425,20 @@ async function main() {
     if (!rows.some(row => row.ok)) process.exitCode = 1
 }
 
+/**
+ * 错误信息里可能带着本机绝对路径（`bdms.node 不存在：D:\Users\…`），
+ * 而这份日志是要被人贴进票里的：绝对路径一律换成文件名。
+ */
+export function safeMessage(error) {
+    return String(error?.message || error).replace(
+        /(?:[A-Za-z]:[\\/](?:[^\s"'`]+)?|(?:\/[^\s/"'`]+){2,}(?:\/[^\s/"'`]+)?)/g,
+        match => path.basename(match) || match,
+    )
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
     main().catch(error => {
-        process.stderr.write(`${String(error?.message || error)}\n`)
+        process.stderr.write(`${safeMessage(error)}\n`)
         process.exitCode = 2
     })
 }
