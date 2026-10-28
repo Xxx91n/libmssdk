@@ -159,12 +159,20 @@ function recordFailure(phase, portIndex, shape, detail) {
     say(`[verify]   失败：端口 ${driver.hostPorts[portIndex]} — ${SHAPES[shape]}（${safe}）`)
 }
 
-/** 把一次「签不出 / 打不通」归到三种形态之一。 */
-async function classifyUnavailable(portIndex, { hung, simultaneousFailures, phase }) {
-    if (!(await driver.pidAlive(portIndex))) return 'processStart'
+/** 把一次「签不出 / 打不通」归到三种形态之一。leg=upstream 表示请求本身没打出去，不能算进程问题。 */
+async function classifyUnavailable(portIndex, { hung, simultaneousFailures, phase, leg = 'sign' }) {
+    if (leg === 'upstream') return 'unclassified'
+    const alive = await driver.pidAlive(portIndex)
+    if (alive === null) return 'unclassified'
+    if (alive === false) return 'processStart'
     if (phase === 'survivor') return 'prefixContention'
     if (simultaneousFailures >= 2) return 'prefixContention'
     return hung ? 'unclassified' : 'processStart'
+}
+
+function tagLeg(error, leg) {
+    if (error && typeof error === 'object') error.leg = leg
+    return error
 }
 
 /** 一次 /sign：只留长度与脱敏设备号，签名值当场登记为敏感后丢弃。 */
@@ -192,7 +200,7 @@ async function signOn(portIndex, { url, method = 'POST', body = '', headers, dev
         }
     } catch (error) {
         report.tally.signFailures += 1
-        throw error
+        throw tagLeg(error, 'sign')
     }
 }
 
@@ -227,7 +235,7 @@ async function upstreamWithSignature(portIndex, device) {
         text = await response.text()
     } catch (error) {
         report.tally.upstreamFailures += 1
-        throw error
+        throw tagLeg(error, 'upstream')
     }
     const summary = summarizeTrackV2Response(text, trackId)
     if (!summary.accepted) report.tally.upstreamFailures += 1
@@ -275,7 +283,7 @@ async function main() {
     if (notReady.length) {
         for (const entry of notReady) {
             const stderr = await driver.stderrOf(entry.index)
-            const shape = await classifyUnavailable(entry.index, { hung: entry.lastErrorKind !== 'refused', simultaneousFailures: notReady.length, phase: 'ready' })
+            const shape = await classifyUnavailable(entry.index, { hung: entry.lastErrorKind === 'timeout', simultaneousFailures: notReady.length, phase: 'ready' })
             recordFailure('ready', entry.index, shape, `就绪超时（${entry.lastErrorKind}）；stderr ${stderr.bytes} 字节`)
         }
         report.criteria.bothSign = { status: 'FAIL', reason: '不是所有进程都就绪', portsNotReady: notReady.map(entry => driver.hostPorts[entry.index]) }
@@ -288,11 +296,12 @@ async function main() {
         return
     }
     say(`[verify] ${driver.hostPorts.length} 个进程都就绪（/healthz 200）`)
+    // 起控制面时 pid 文件可能还没写（容器入口先跑 wineboot / 身份前置），就绪后再读一次才是真值
+    report.processes = await driver.processes()
 
     // ——— 判据 1：两个进程同时签名（不带 cookie 的中性请求）———
     const plainSpec = {
-        url: `https://api.qishui.com/luna/pc/track_v2?aid=386088&device_id=${device.deviceId}&fp=${device.fp}`,
-        headers: { 'user-agent': 'LunaPC/verify', 'content-type': 'application/json' },
+        ...buildTrackV2Request({ trackId: trackId || '0', deviceId: device.deviceId, iid: device.iid, fp: device.fp }),
         deviceId: device.deviceId,
     }
     const signResults = await Promise.allSettled(
@@ -340,10 +349,14 @@ async function main() {
         const rows = []
         for (const [index, item] of upstreamResults.entries()) {
             if (item.status === 'rejected') {
-                const detail = String(item.reason?.message || item.reason)
-                const shape = detail.includes('/sign')
-                    ? await classifyUnavailable(index, { hung: isHang(item.reason), simultaneousFailures: 1, phase: 'upstreamOnce' })
-                    : 'unclassified'
+                const error = item.reason
+                const detail = String(error?.message || error)
+                const shape = await classifyUnavailable(index, {
+                    hung: isHang(error),
+                    simultaneousFailures: 1,
+                    phase: 'upstreamOnce',
+                    leg: error?.leg || 'sign',
+                })
                 recordFailure('upstreamOnce', index, shape, detail)
                 continue
             }
@@ -378,9 +391,15 @@ async function main() {
             const port = driver.hostPorts[index]
             tally.signAttempts += 1
             if (item.status === 'rejected') {
-                const detail = String(item.reason?.message || item.reason)
-                tally.signFailures += 1
-                const shape = await classifyUnavailable(index, { hung: isHang(item.reason), simultaneousFailures: failureCount, phase: 'rounds' })
+                const error = item.reason
+                const leg = error?.leg || 'sign'
+                const detail = `${String(error?.message || error)}${leg === 'upstream' ? '（上游请求本身失败，不是签名判定）' : ''}`
+                if (leg === 'sign') tally.signFailures += 1
+                else {
+                    tally.upstreamAttempts += 1
+                    tally.upstreamFailures += 1
+                }
+                const shape = await classifyUnavailable(index, { hung: isHang(error), simultaneousFailures: failureCount, phase: 'rounds', leg })
                 recordFailure('rounds', index, shape, `第 ${round} 轮：${detail}`)
                 row[port] = 'failed'
                 continue
@@ -425,7 +444,11 @@ async function main() {
     await driver.killProcess(victimIndex)
     await sleep(3000)
     report.observations.processesAfterKill = await driver.processSnapshot()
-    const victimGone = !(await driver.pidAlive(victimIndex))
+    // 「被杀的进程真的没了」要两件事同时成立：pid 不在了，而且它的端口不再应答。
+    // 只查 pid 会把「wine 包装进程死了、node.exe 还占着端口」误判成通过。
+    const victimPidState = await driver.pidAlive(victimIndex)
+    const victimAnswering = Boolean(await driver.healthz(victimIndex))
+    const victimGone = victimPidState === false && !victimAnswering
     let survivor
     try {
         const signed = await signOn(survivorIndex, plainSpec)
@@ -437,7 +460,10 @@ async function main() {
         survivor = { ok: false, hung: isHang(error) }
     }
     report.observations.victimGone = victimGone
-    if (!victimGone) recordFailure('survivor', victimIndex, 'unclassified', '被杀的进程仍然存活，判据 4 的前提不成立')
+    report.observations.victimAnswering = victimAnswering
+    if (victimPidState === null) recordFailure('survivor', victimIndex, 'unclassified', '读不到被杀进程的 pid 文件，无法判断它是否还在')
+    else if (victimAnswering) recordFailure('survivor', victimIndex, 'unclassified', '被杀进程仍在应答 /healthz，杀没生效')
+    else if (victimPidState) recordFailure('survivor', victimIndex, 'unclassified', '被杀进程的 pid 仍存活')
     if (hasUpstream && survivor.ok) {
         try {
             const { upstream } = await upstreamWithSignature(survivorIndex, device)
@@ -455,7 +481,8 @@ async function main() {
         survivor,
         survivorStderrBytes: (await driver.stderrOf(survivorIndex)).bytes,
     }
-    say(`[verify] 判据 4 ${report.criteria.survivor.status}：存活方${survivor.ok ? '继续出签名' : '不再出签名'}`)
+    const survivorReason = survivor.ok ? '存活方继续出签名' : '存活方不再出签名'
+    say(`[verify] 判据 4 ${report.criteria.survivor.status}：${survivorReason}${survivor.ok && phaseFailed('survivor') ? '，但该阶段另有失败记录（见上）' : ''}`)
 
     // ——— 判据 6：服务自己的日志不该出现 cookie / 签名值 / 完整设备号 ———
     const leakedKinds = new Set()
@@ -465,9 +492,18 @@ async function main() {
         scannedBytes += text.length
         for (const kind of redactor.find(text)) leakedKinds.add(kind)
     }
-    report.criteria.logHygiene = { status: leakedKinds.size ? 'FAIL' : 'PASS', scannedBytes, leakedKinds: [...leakedKinds] }
+    // 没跑过带 cookie 的判据时，「日志里没有 cookie」这条并没有被真正检验过，不能算 PASS
+    const scannedFor = redactor.kinds()
+    const cookieCovered = scannedFor.includes('cookie')
+    report.criteria.logHygiene = {
+        status: leakedKinds.size ? 'FAIL' : cookieCovered ? 'PASS' : 'PARTIAL',
+        scannedBytes,
+        scannedFor,
+        leakedKinds: [...leakedKinds],
+        note: cookieCovered ? '' : '本次没有 cookie 参与签名，日志扫描只覆盖了设备号 / iid / fp / 签名值；cookie 维度未验证',
+    }
     if (leakedKinds.size) recordFailure('logHygiene', 0, 'unclassified', `服务日志里出现了敏感值：${[...leakedKinds].join(', ')}`)
-    say(`[verify] 判据 6 ${report.criteria.logHygiene.status}：扫了 ${scannedBytes} 字节 serve 日志`)
+    say(`[verify] 判据 6 ${report.criteria.logHygiene.status}：扫了 ${scannedBytes} 字节 serve 日志（查 ${scannedFor.join('/') || '无'}）`)
 
     printConclusion()
 }
@@ -475,7 +511,7 @@ async function main() {
 function printConclusion() {
     const rows = CRITERIA.map(([key, label]) => [label, report.criteria[key]?.status || 'NOT_RUN'])
     const failing = rows.filter(([, status]) => status === 'FAIL')
-    const skipped = rows.filter(([, status]) => ['SKIPPED', 'BLOCKED', 'NOT_RUN'].includes(status))
+    const skipped = rows.filter(([, status]) => ['SKIPPED', 'BLOCKED', 'NOT_RUN', 'PARTIAL'].includes(status))
     const shapeCounts = Object.entries(report.tally.shapes).filter(([, count]) => count > 0)
     report.verdict = failing.length ? 'FAIL' : skipped.length ? 'INCOMPLETE' : 'PASS'
 

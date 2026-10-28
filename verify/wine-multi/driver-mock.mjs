@@ -11,6 +11,7 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
+import { fetchHealthz, waitForReady } from './endpoints.mjs'
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '..', '..')
 const MOCK_BDMS = path.join(PROJECT_ROOT, 'test', 'fixtures', 'mock-bdms.mjs')
@@ -70,6 +71,7 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
                 LIBMSSDK_PORT: String(bindPort),
                 LIBMSSDK_STATE_DIR: stateDir,
                 LIBMSSDK_BDMS_MODULE: MOCK_BDMS,
+                // 彩排只绑 127.0.0.1，不设 token：本验证要测的是多进程加载，不是鉴权路径
                 LIBMSSDK_TOKEN: '',
             },
             stdio: ['ignore', out, err],
@@ -147,7 +149,6 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
                 nodeHost: process.version,
                 signatureModule: 'test/fixtures/mock-bdms.mjs',
                 upstream: origin,
-                stateDir,
                 summary: `彩排模式（scenario=${scenario}）：本机 Node ${process.version} + mock 签名模块 + 假上游 ${origin}；只验证判据流水线与脱敏，不证明 Wine 行为`,
             }
         },
@@ -163,31 +164,11 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
         },
 
         async healthz(index) {
-            try {
-                const response = await fetch(`http://127.0.0.1:${ports[index]}/healthz`, { signal: AbortSignal.timeout(5000) })
-                if (!response.ok) return null
-                return await response.json()
-            } catch {
-                return null
-            }
+            return fetchHealthz(ports[index])
         },
 
         async waitForReady(timeoutMs) {
-            const deadline = Date.now() + timeoutMs
-            const pending = new Map(ports.map((_, index) => [index, 'unknown']))
-            while (pending.size && Date.now() < deadline) {
-                for (const index of [...pending.keys()]) {
-                    try {
-                        const response = await fetch(`http://127.0.0.1:${ports[index]}/healthz`, { signal: AbortSignal.timeout(3000) })
-                        if (response.ok) pending.delete(index)
-                        else pending.set(index, 'http')
-                    } catch (error) {
-                        pending.set(index, error?.name === 'TimeoutError' ? 'timeout' : 'refused')
-                    }
-                }
-                if (pending.size) await new Promise(resolve => setTimeout(resolve, 500))
-            }
-            return [...pending.entries()].map(([index, lastErrorKind]) => ({ index, lastErrorKind }))
+            return waitForReady(ports, { timeoutMs, intervalMs: 500, probeTimeoutMs: 3000 })
         },
 
         async readLogText(index) {
@@ -214,10 +195,11 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
             }
             return { bytes: text.length, tail: text.split('\n').filter(Boolean).slice(-8) }
         },
-
+        /** true = 进程在；false = 确认不在；null = 没有这个进程的记录，无法判断。 */
         async pidAlive(index) {
             const entry = entryFor(index)
-            if (!entry || isDead(entry)) return false
+            if (!entry) return null
+            if (isDead(entry)) return false
             try {
                 process.kill(entry.pid, 0)
                 return true

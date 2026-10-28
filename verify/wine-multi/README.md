@@ -25,15 +25,22 @@ bash verify/wine-multi/run.sh --mode mock
 | 1 两个进程同时签名 | 两边 `/sign` 都出 `X-Helios` / `X-Medusa` | 进程起不来 |
 | 2 各自签的头各打一次上游 | 上游回包非空且能解析成曲目 | 签名能出但上游不接受 |
 | 3 连打 N 轮 | 每轮两边各签一次（有 cookie 时各打一次上游） | 上面两种 |
-| 4 杀掉一个，另一个继续服务 | 存活方仍出签名 | 一个进程把共享 prefix 拖垮 |
+| 4 杀掉一个，另一个继续服务 | 被杀方 pid 不再存在**且**它的端口不再应答；存活方仍出签名 | 一个进程把共享 prefix 拖垮 |
 | 5 两个进程共用同一份身份 | 两个 `/healthz` 的脱敏设备号彼此相同且等于身份文件 | 单列发现（device_id 分裂属 #2） |
-| 6 输出与日志不泄露 | 扫 serve 自己的日志与结果文件，找 cookie / 签名值 / 完整设备号 | 脱敏失败 |
+| 6 输出与日志不泄露 | 扫 serve 自己的日志，找 cookie / 签名值 / 完整设备号；结果文件在写盘前拦 | 脱敏失败 |
 
 三种失败形态靠**可观察特征**区分，不靠猜：
 
-* **进程起不来** —— `/healthz` 连不上且该进程的 pid 已退出，`stderr` 有内容。
+* **进程起不来** —— 该进程的 pid 确认不在了（或端口从头到尾没开始应答），通常伴随 `stderr` 有内容。
 * **签名能出但上游不接受** —— `/sign` 回 200 且两个头都在，上游是 `HTTP 200 + 0 字节`（官方对签名不符的真实形态）或非 200。
 * **一个进程把共享 prefix 拖垮** —— 同一时间窗内两个端口一起失败，或杀掉一个之后另一个不再应答而它自己的 pid 还活着、`stderr` 安静。
+
+上游请求本身失败（网络、超时）不冒充上面三种，记成「说不清」并附原始错误；签名请求与上游请求分开计数，
+所以「签名失败 N 次」只算 `/sign` 这一步。判据 6 在没跑过带 cookie 的判据时只记 `PARTIAL`：
+没有 cookie 参与签名，「日志里没有 cookie」这条就没被真正检验过。
+
+判据 2 的门禁是「上游接不接受这份签名」，**不是** `fullTrack`：后者取决于账号权益与设备身份
+（#10 在查这件事），把它当门禁会把权益问题误报成多进程问题。`fullTrack` 与曲目时长仍如实记在结果里。
 
 ## 前置条件
 
@@ -45,6 +52,8 @@ bash verify/wine-multi/run.sh --mode mock
    不进 `docker inspect`、不进结果文件**。
 4. **一个 `track_id`**：用本机实际播放过的曲子最能说明问题。
 5. 首次构建镜像需要能访问 `dl.winehq.org` 与 `nodejs.org`（约 3–5 分钟）。
+6. **宿主侧 Node ≥ 20.11**（harness 用到 `import.meta.dirname`）。容器里跑的是镜像钉住的
+   Windows Node 20.18.0，与这条无关；`package.json` 的 `>=18` 说的是服务本身，验证脚本不在其中。
 
 镜像与卷：默认用 `deploy/Dockerfile` 构建 `libmssdk:local`，身份与 Wine prefix 各用一个命名卷。
 `--skip-build --image <已有 tag>` 复用镜像，`--data-volume` / `--wine-volume` 复用已有的身份与 prefix。
@@ -82,6 +91,9 @@ bash verify/wine-multi/run.sh --mode mock
 注入失败形态：`--scenario ok | process-start | upstream-reject | prefix-contention`。
 最后一种用 `SIGSTOP` 复现「pid 还在、不应答、stderr 安静」的卡死形态，需要 Linux/WSL。
 
+彩排给两个进程各挑一个本机空闲端口（先绑再放，存在极小的竞争窗口）；真撞上端口占用时，
+结论会以「进程起不来」的形式出现，重跑一次即可。
+
 ## 敏感边界
 
 * cookie 只在宿主进程的环境里；容器与镜像里都没有它。
@@ -95,6 +107,7 @@ bash verify/wine-multi/run.sh --mode mock
 | `run.sh` | 一条命令：镜像 / 容器 / 二进制进容器 / 跑 harness / 收尾 |
 | `container-entry.sh` | 容器入口：同一个 prefix 起 N 个 `serve`，日志落文件 |
 | `harness.mjs` | 判据流水线、失败形态判定、结论与脱敏 |
+| `endpoints.mjs` | 两个控制面共用的 `/healthz` 探活与就绪等待 |
 | `driver-docker.mjs` | 真环境控制面：`docker exec` 读日志、探活、杀进程、记版本 |
 | `driver-mock.mjs` | 彩排控制面：本机两个 serve + 假上游 + 故障注入 |
 

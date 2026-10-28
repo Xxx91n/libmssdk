@@ -6,6 +6,7 @@
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { fetchHealthz, waitForReady } from './endpoints.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -35,7 +36,8 @@ export function createDockerDriver({ container, containerPorts, hostPorts }) {
 
     async function readPid(index) {
         const text = (await inContainer(`cat ${pidFile(index)} 2>/dev/null || true`)).trim()
-        return /^\d+$/.test(text) ? Number(text) : 0
+        // 空 = 读不到（容器入口还没写到、或 /logs 卷不对）；0 会被误当成「进程已不在」
+        return /^\d+$/.test(text) ? Number(text) : null
     }
 
     /** Wine 下的 Windows 版 Node 打不开管道型 stdio，所以它的输出必须先落文件再 cat。 */
@@ -93,32 +95,11 @@ export function createDockerDriver({ container, containerPorts, hostPorts }) {
         },
 
         async healthz(index) {
-            try {
-                const response = await fetch(`http://127.0.0.1:${publicPorts[index]}/healthz`, { signal: AbortSignal.timeout(5000) })
-                if (!response.ok) return null
-                return await response.json()
-            } catch {
-                return null
-            }
+            return fetchHealthz(publicPorts[index])
         },
 
-        /** 返回没就绪的进程及最后一次失败的形态（refused = 没监听，timeout = 起了但不答话）。 */
         async waitForReady(timeoutMs) {
-            const deadline = Date.now() + timeoutMs
-            const pending = new Map(publicPorts.map((_, index) => [index, 'unknown']))
-            while (pending.size && Date.now() < deadline) {
-                for (const index of [...pending.keys()]) {
-                    try {
-                        const response = await fetch(`http://127.0.0.1:${publicPorts[index]}/healthz`, { signal: AbortSignal.timeout(4000) })
-                        if (response.ok) pending.delete(index)
-                        else pending.set(index, 'http')
-                    } catch (error) {
-                        pending.set(index, error?.name === 'TimeoutError' ? 'timeout' : 'refused')
-                    }
-                }
-                if (pending.size) await new Promise(resolve => setTimeout(resolve, 2000))
-            }
-            return [...pending.entries()].map(([index, lastErrorKind]) => ({ index, lastErrorKind }))
+            return waitForReady(publicPorts, { timeoutMs, intervalMs: 2000, probeTimeoutMs: 4000 })
         },
 
         async readLogText(index) {
@@ -130,16 +111,18 @@ export function createDockerDriver({ container, containerPorts, hostPorts }) {
             return { bytes: text.length, tail: text.split('\n').filter(Boolean).slice(-8) }
         },
 
+        /** true = 进程在；false = 确认不在；null = 读不到 pid 文件，无法判断。 */
         async pidAlive(index) {
             const pid = await readPid(index)
-            if (!pid) return false
+            if (pid === null) return null
             const out = await inContainer(`kill -0 ${pid} 2>/dev/null && echo alive || echo gone`)
             return out.trim() === 'alive'
         },
 
         async killProcess(index) {
             const pid = await readPid(index)
-            if (pid) await inContainer(`kill ${pid} 2>/dev/null || true`)
+            if (pid === null) throw new Error(`读不到端口 ${servePorts[index]} 对应进程的 pid 文件（${pidFile(index)}）`)
+            await inContainer(`kill ${pid} 2>/dev/null || true`)
         },
 
         async readIdentityFile() {
