@@ -11,7 +11,7 @@ const healthUrl = port => `http://127.0.0.1:${port}/healthz`
 export async function probeHealthz(port, probeTimeoutMs = 4000) {
     try {
         const response = await fetch(healthUrl(port), { signal: AbortSignal.timeout(probeTimeoutMs) })
-        return response.status < 400 ? 'ready' : 'http'
+        return response.status === 200 ? 'ready' : 'http'
     } catch (error) {
         return error?.name === 'TimeoutError' ? 'hung' : 'refused'
     }
@@ -27,19 +27,23 @@ export async function fetchHealthz(port, probeTimeoutMs = 4000) {
     }
 }
 
-/** 返回仍未就绪的进程：{index, lastErrorKind}；kind 直接来自 probeHealthz 的形态。 */
+/** 返回仍未就绪的进程：seenKinds 记整个等待期间看到过的形态，只留最后一个会吹成「从头到尾如此」。 */
 export async function waitForReady(ports, { timeoutMs, intervalMs, probeTimeoutMs }) {
     const deadline = Date.now() + timeoutMs
-    const pending = new Map(ports.map((_, index) => [index, 'refused']))
+    const pending = new Map(ports.map((_, index) => [index, new Set(['refused'])]))
     while (pending.size && Date.now() < deadline) {
-        for (const index of [...pending.keys()]) {
+        for (const [index, kinds] of pending) {
             const kind = await probeHealthz(ports[index], probeTimeoutMs)
             if (kind === 'ready') pending.delete(index)
-            else pending.set(index, kind)
+            else kinds.add(kind)
         }
         if (pending.size) await new Promise(resolve => setTimeout(resolve, intervalMs))
     }
-    return [...pending.entries()].map(([index, lastErrorKind]) => ({ index, lastErrorKind }))
+    return [...pending.entries()].map(([index, kinds]) => ({
+        index,
+        lastErrorKind: [...kinds].at(-1),
+        seenKinds: [...kinds],
+    }))
 }
 
 export function tailLines(text, count = 8) {

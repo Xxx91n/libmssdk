@@ -17,7 +17,7 @@ import { createDockerDriver } from './driver-docker.mjs'
 import { createMockDriver, SCENARIOS } from './driver-mock.mjs'
 
 const SHAPES = {
-    processStart: '进程起不来',
+    processStart: '进程起不来（含起来过又退出）',
     upstreamRejected: '签名能出但上游不接受',
     prefixContention: '一个进程把共享 prefix 拖垮',
     unclassified: '说不清（原始证据见 failures）',
@@ -73,9 +73,11 @@ const cookie =
 const trackId = String(args.track || process.env.LIBMSSDK_VERIFY_TRACK_ID || (mode === 'mock' ? '1000000000000000001' : '')).trim()
 const rounds = Number(args.rounds || (mode === 'mock' ? 3 : 10))
 const readyTimeoutMs = Number(args['ready-timeout-ms'] || (mode === 'mock' ? 20000 : 180000))
-const signTimeoutMs = Number(args['sign-timeout-ms'] || (mode === 'mock' ? 15000 : 60000))
-const upstreamTimeoutMs = Number(args['upstream-timeout-ms'] || 15000)
-const outDir = args.out || path.join(import.meta.dirname, 'results')
+// 签名腿 60 秒是给 Wine 冷启动留的余量（实测热态几十到一百多毫秒）；彩排只用 15 秒，
+// 因为「存活方挂住」这条判据就是靠超时来观察的
+const signTimeoutMs = mode === 'mock' ? 15000 : 60000
+const upstreamTimeoutMs = 15000
+const outDir = path.join(import.meta.dirname, 'results')
 
 /** 输出脱敏：登记过的敏感值不允许出现在控制台行或结果文件里，命中即记一条泄漏并替换。 */
 class Redactor {
@@ -196,7 +198,15 @@ async function signOn(portIndex, { url, method = 'POST', body = '', headers, dev
             error.served = true
             throw error
         }
-        const payload = JSON.parse(text)
+        let payload
+        try {
+            payload = JSON.parse(text)
+        } catch (error) {
+            // 200 但回包不是 JSON：进程在答话，只是答得不对，不能算「起不来」
+            const wrapped = new Error(`/sign 回包不是 JSON：${String(error.message).slice(0, 120)}`)
+            wrapped.served = true
+            throw wrapped
+        }
         const signed = payload.headers || {}
         for (const value of Object.values(signed)) redactor.forbid(value, 'signature')
         redactor.forbid(payload.device_id, 'device_id')
@@ -275,26 +285,6 @@ async function main() {
     report.environment = await driver.environment()
     say(`[verify] 环境：${report.environment.summary}`)
 
-    const identityText = await driver.readIdentityFile()
-    if (!identityText) {
-        report.verdict = 'INCOMPLETE'
-        report.criteria.identity = { status: 'BLOCKED', reason: '读不到共享身份文件' }
-        say('[verify] 读不到共享身份文件（两个 serve 的 LIBMSSDK_STATE_DIR 下应有 identity.json），验证无法继续。')
-        return
-    }
-    let identity
-    try {
-        identity = JSON.parse(identityText)
-    } catch (error) {
-        report.verdict = 'INCOMPLETE'
-        say(`[verify] 身份文件不是合法 JSON：${redactor.sanitize('console', error.message)}`)
-        return
-    }
-    for (const key of ['device_id', 'iid', 'fp']) redactor.forbid(identity[key], key)
-    const device = { deviceId: identity.device_id, iid: identity.iid, fp: identity.fp }
-    report.identity = { deviceIdMasked: maskDeviceId(identity.device_id), hasIid: Boolean(identity.iid), hasFp: Boolean(identity.fp) }
-    say(`[verify] 共享身份 device_id=${maskDeviceId(identity.device_id)}（只以脱敏形式出现）`)
-
     // ——— 就绪：进程起没起来，是三种形态的第一种 ———
     const notReady = await driver.waitForReady(readyTimeoutMs)
     if (notReady.length) {
@@ -306,7 +296,7 @@ async function main() {
                 simultaneousFailures: notReady.length,
                 phase: 'ready',
             })
-            recordFailure('ready', entry.index, shape, `就绪超时（${entry.lastErrorKind}）；stderr ${stderr.bytes} 字节`)
+            recordFailure('ready', entry.index, shape, `就绪超时，等待期间看到 ${entry.seenKinds.join('/')}；stderr ${stderr.bytes} 字节`)
         }
         report.criteria.bothSign = { status: 'FAIL', reason: '不是所有进程都就绪', portsNotReady: notReady.map(entry => driver.hostPorts[entry.index]) }
         report.observations.stderrEvidence = await Promise.all(
@@ -320,6 +310,30 @@ async function main() {
     say(`[verify] ${driver.hostPorts.length} 个进程都就绪（/healthz 200）`)
     // 起控制面时 pid 文件可能还没写（容器入口先跑 wineboot / 身份前置），就绪后再读一次才是真值
     report.processes = await driver.processes()
+
+    // 身份文件要等容器入口的前置步骤跑完才存在，所以放在就绪之后读
+    const identityText = await driver.readIdentityFile()
+    if (!identityText) {
+        report.verdict = 'INCOMPLETE'
+        report.criteria.identity = { status: 'BLOCKED', reason: '进程已就绪但读不到共享身份文件' }
+        say('[verify] 进程就绪了，但读不到共享身份文件（两个 serve 的 LIBMSSDK_STATE_DIR 下应有 identity.json），验证无法继续。')
+        printConclusion()
+        return
+    }
+    let identity
+    try {
+        identity = JSON.parse(identityText)
+    } catch (error) {
+        report.verdict = 'INCOMPLETE'
+        report.criteria.identity = { status: 'BLOCKED', reason: '身份文件不是合法 JSON' }
+        say(`[verify] 身份文件不是合法 JSON：${redactor.sanitize('console', error.message)}`)
+        printConclusion()
+        return
+    }
+    for (const key of ['device_id', 'iid', 'fp']) redactor.forbid(identity[key], key)
+    const device = { deviceId: identity.device_id, iid: identity.iid, fp: identity.fp }
+    report.identity = { deviceIdMasked: maskDeviceId(identity.device_id), hasIid: Boolean(identity.iid), hasFp: Boolean(identity.fp) }
+    say(`[verify] 共享身份 device_id=${maskDeviceId(identity.device_id)}（只以脱敏形式出现）`)
 
     // ——— 判据 1：两个进程同时签名（不带 cookie 的中性请求）———
     const plainSpec = {
@@ -354,16 +368,19 @@ async function main() {
     const healthMasks = []
     for (let index = 0; index < driver.hostPorts.length; index += 1) healthMasks.push((await driver.healthz(index))?.deviceId || '')
     const expectedMask = maskDeviceId(device.deviceId)
-    const identityConsistent = healthMasks.every(mask => mask && mask === expectedMask)
+    const unreadable = healthMasks.filter(mask => !mask).length
+    const identityConsistent = unreadable === 0 && healthMasks.every(mask => mask === expectedMask)
     report.criteria.identity = {
-        status: identityConsistent ? 'PASS' : 'FAIL',
+        status: identityConsistent ? 'PASS' : unreadable ? 'BLOCKED' : 'FAIL',
         expected: expectedMask,
         perProcess: driver.hostPorts.map((port, index) => ({ port, deviceId: healthMasks[index] })),
         note: identityConsistent
             ? '两个进程读到的身份一致'
-            : '两个进程身份不一致：device_id 分裂属 #2 的范围；本验证在起进程前已落盘身份，正常不该出现',
+            : unreadable
+              ? `${unreadable} 个进程的 /healthz 读不到脱敏设备号，无法比对——这不等于身份分裂`
+              : '两个进程身份不一致：device_id 分裂属 #2 的范围；本验证在起进程前已落盘身份，正常不该出现',
     }
-    if (!identityConsistent) recordFailure('identity', 0, 'unclassified', '各进程 /healthz 报告的脱敏设备号不一致')
+    if (!identityConsistent) recordFailure('identity', 0, 'unclassified', report.criteria.identity.note)
 
     // ——— 判据 2：各自签的头各打一次真实上游 ———
     const hasUpstream = Boolean(cookie && trackId)
@@ -401,7 +418,7 @@ async function main() {
 
     // ——— 判据 3：连打多轮 ———
     say(`[verify] 判据 3：连打 ${rounds} 轮（${hasUpstream ? '每轮两边各签 + 各打一次上游' : '每轮两边各签一次'}）`)
-    const tally = { rounds, signAttempts: 0, signFailures: 0, upstreamAttempts: 0, upstreamFailures: 0, samples: [] }
+    const roundTally = { rounds, signAttempts: 0, signFailures: 0, upstreamAttempts: 0, upstreamFailures: 0, samples: [] }
     for (let round = 1; round <= rounds; round += 1) {
         const outcomes = await Promise.allSettled(
             driver.hostPorts.map(async (_, index) => {
@@ -417,15 +434,15 @@ async function main() {
         const row = { round }
         for (const [index, item] of outcomes.entries()) {
             const port = driver.hostPorts[index]
-            tally.signAttempts += 1
+            roundTally.signAttempts += 1
             if (item.status === 'rejected') {
                 const error = item.reason
                 const leg = error?.leg || 'sign'
                 const detail = `${String(error?.message || error)}${leg === 'upstream' ? '（上游请求本身失败，不是签名判定）' : ''}`
-                if (leg === 'sign') tally.signFailures += 1
+                if (leg === 'sign') roundTally.signFailures += 1
                 else {
-                    tally.upstreamAttempts += 1
-                    tally.upstreamFailures += 1
+                    roundTally.upstreamAttempts += 1
+                    roundTally.upstreamFailures += 1
                 }
                 const shape = await classifyUnavailable(index, {
                     hung: isHang(error),
@@ -440,36 +457,36 @@ async function main() {
             }
             const sample = item.value
             if (sample.upstream) {
-                tally.upstreamAttempts += 1
+                roundTally.upstreamAttempts += 1
                 if (!sample.upstream.accepted) {
-                    tally.upstreamFailures += 1
+                    roundTally.upstreamFailures += 1
                     recordFailure('rounds', index, 'upstreamRejected', `第 ${round} 轮：HTTP ${sample.upstream.http}，回包 ${sample.upstream.bodyBytes} 字节`)
                 }
             }
             row[port] = { signMs: sample.sign.ms, medusa: sample.sign.medusa, http: sample.upstream?.http ?? null, accepted: sample.upstream?.accepted ?? null }
         }
-        tally.samples.push(row)
+        roundTally.samples.push(row)
         if (round === rounds || round % 5 === 0) say(`[verify]   第 ${round}/${rounds} 轮：${redactor.sanitize('console', JSON.stringify(row))}`)
     }
     const medusaLengths = new Set()
-    for (const row of tally.samples) {
+    for (const row of roundTally.samples) {
         for (const [key, value] of Object.entries(row)) if (key !== 'round' && value?.medusa) medusaLengths.add(value.medusa)
     }
-    tally.medusaLengths = [...medusaLengths].sort((a, b) => a - b)
-    tally.stderrBytes = {}
-    for (const [index, port] of driver.hostPorts.entries()) tally.stderrBytes[port] = (await driver.stderrOf(index)).bytes
-    tally.processes = await driver.processSnapshot()
-    report.tally.rounds = tally
+    roundTally.medusaLengths = [...medusaLengths].sort((a, b) => a - b)
+    roundTally.stderrBytes = {}
+    for (const [index, port] of driver.hostPorts.entries()) roundTally.stderrBytes[port] = (await driver.stderrOf(index)).bytes
+    roundTally.processes = await driver.processSnapshot()
+    report.tally.rounds = roundTally
     report.criteria.rounds = {
-        status: tally.signFailures === 0 && tally.upstreamFailures === 0 ? 'PASS' : 'FAIL',
+        status: roundTally.signFailures === 0 && roundTally.upstreamFailures === 0 ? 'PASS' : 'FAIL',
         upstreamExecuted: hasUpstream,
-        signAttempts: tally.signAttempts,
-        signFailures: tally.signFailures,
-        upstreamAttempts: tally.upstreamAttempts,
-        upstreamFailures: tally.upstreamFailures,
-        medusaLengths: tally.medusaLengths,
+        signAttempts: roundTally.signAttempts,
+        signFailures: roundTally.signFailures,
+        upstreamAttempts: roundTally.upstreamAttempts,
+        upstreamFailures: roundTally.upstreamFailures,
+        medusaLengths: roundTally.medusaLengths,
     }
-    say(`[verify] 判据 3 ${report.criteria.rounds.status}：签名失败 ${tally.signFailures} / 上游未接受 ${tally.upstreamFailures}`)
+    say(`[verify] 判据 3 ${report.criteria.rounds.status}：签名失败 ${roundTally.signFailures} / 上游未接受 ${roundTally.upstreamFailures}`)
 
     // ——— 判据 4：杀掉一个，另一个继续服务 ———
     const victimIndex = driver.hostPorts.length - 1
@@ -540,13 +557,17 @@ async function main() {
     }
     // 没跑过带 cookie 的判据时，「日志里没有 cookie」这条并没有被真正检验过，不能算 PASS
     const scannedFor = redactor.kinds()
+    const uncovered = ['cookie', 'device_id', 'iid', 'fp'].filter(kind => !scannedFor.includes(kind))
     const cookieCovered = scannedFor.includes('cookie')
     report.criteria.logHygiene = {
         status: leakedKinds.size ? 'FAIL' : cookieCovered ? 'PASS' : 'PARTIAL',
         scannedBytes,
         scannedFor,
         leakedKinds: [...leakedKinds],
-        note: cookieCovered ? '' : '本次没有 cookie 参与签名，日志扫描只覆盖了设备号 / iid / fp / 签名值；cookie 维度未验证',
+        // fp 与 device_id 同值时只会登记一次，所以这里报「查过哪些值」而不是「查过哪些名字」
+        note: cookieCovered
+            ? ''
+            : `没有 cookie 参与签名，日志扫描只覆盖了 ${scannedFor.join('/') || '（空）'}；未覆盖：${uncovered.join('/') || '无'}`,
     }
     if (leakedKinds.size) recordFailure('logHygiene', 0, 'unclassified', `服务日志里出现了敏感值：${[...leakedKinds].join(', ')}`)
     say(`[verify] 判据 6 ${report.criteria.logHygiene.status}：扫了 ${scannedBytes} 字节 serve 日志（查 ${scannedFor.join('/') || '无'}）`)
@@ -574,9 +595,18 @@ function printConclusion() {
 
 try {
     await main()
+} catch (error) {
+    // 控制面本身没起来（容器没在跑、docker 不可用…）：这既不是「失败」也不是「部分完成」，
+    // 是根本没跑成 —— 用 3，并且只输出脱敏后的一行，不把裸栈打进日志
+    const detail = redactor.sanitize('fatal', String(error?.message || error))
+    process.stdout.write(`[verify] 执行中断，验证没有真正跑起来：${detail}\n`)
+    process.stdout.write('[verify] 结论：未执行（前置条件或控制面问题）\n')
+    report.verdict = 'NOT_RUN'
+    process.exitCode = 3
 } finally {
     await driver.teardown?.()
     report.finishedAt = new Date().toISOString()
+    // 先算 redaction 再序列化，否则写进文件的那份永远是空计数
     report.redaction = { forbidden: redactor.kinds(), leaks: redactor.leaks.length }
     const serialized = redactor.sanitize('report', `${JSON.stringify(report, null, 2)}\n`)
     if (redactor.leaks.length) {

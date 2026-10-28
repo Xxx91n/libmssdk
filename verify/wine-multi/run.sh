@@ -23,6 +23,7 @@ CLIENT_DIR=''
 ENVFILE=''
 TRACK=''
 ROUNDS=''
+READY_TIMEOUT=''
 SCENARIO=ok
 KEEP=0
 SKIP_BUILD=0
@@ -38,6 +39,7 @@ usage() {
   --mode docker|mock     docker = 真环境（默认）；mock = 本机彩排（不需要 Docker/Wine/凭据）
   --track <track_id>     要打真实上游判据时必填；不给则跳过上游判据，结论记为「部分完成」
   --rounds <N>           连打轮数（docker 默认 10，mock 默认 3）
+  --ready-timeout-ms <N> 等两个进程就绪的预算（docker 默认 180000，Wine prefix 首启用得上）
   --client-dir <目录>    自备 bdms.node / metasecml.dll 所在目录（默认 vendor/soda-music）
   --env-file <文件>      给 LIBMSSDK_COOKIE 用的环境文件（600，只 source 给宿主侧，不进容器）
   --image <tag>          使用/产出的镜像 tag（默认 libmssdk:local）
@@ -64,6 +66,7 @@ while [[ $# -gt 0 ]]; do
         --mode) MODE=$2; shift 2 ;;
         --track) TRACK=$2; shift 2 ;;
         --rounds) ROUNDS=$2; shift 2 ;;
+        --ready-timeout-ms) READY_TIMEOUT=$2; shift 2 ;;
         --client-dir) CLIENT_DIR=$2; shift 2 ;;
         --env-file) ENVFILE=$2; shift 2 ;;
         --image) IMAGE=$2; shift 2 ;;
@@ -82,9 +85,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$MODE" == mock ]]; then
+    [[ -z "$ENVFILE" ]] || echo '[verify] 提醒：--mode mock 用随机哨兵串当 cookie，--env-file 在这里不生效（真实凭据不该进彩排）。' >&2
     echo '[verify] 彩排模式：本机 Node + 仓库自带 mock 签名模块 + 假上游，不碰 Docker/Wine/真实凭据。'
     MOCK_ARGS=(--mode mock --scenario "$SCENARIO")
     [[ -n "$ROUNDS" ]] && MOCK_ARGS+=(--rounds "$ROUNDS")
+    [[ -n "$READY_TIMEOUT" ]] && MOCK_ARGS+=(--ready-timeout-ms "$READY_TIMEOUT")
     exec "$NODE_BIN" "$SCRIPT_DIR/harness.mjs" "${MOCK_ARGS[@]}"
 fi
 
@@ -174,6 +179,7 @@ echo '[verify] 容器已启动（Wine prefix 首启 20-40 秒，之后复用卷�
 HARNESS_ARGS=(--mode docker --container "$CONTAINER" --container-ports "$(IFS=,; echo "${SERVE_PORT_ARRAY[*]}")" --host-ports "$HOST_PORTS")
 [[ -n "$TRACK" ]] && HARNESS_ARGS+=(--track "$TRACK")
 [[ -n "$ROUNDS" ]] && HARNESS_ARGS+=(--rounds "$ROUNDS")
+[[ -n "$READY_TIMEOUT" ]] && HARNESS_ARGS+=(--ready-timeout-ms "$READY_TIMEOUT")
 if [[ -z "$TRACK" ]]; then
     echo '[verify] 没给 --track：不打真实上游，判据 2 与判据 3 的上游部分不会执行，结论最多是「部分完成」。' >&2
 fi

@@ -57,7 +57,7 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
     let stoppedSiblings = false
 
     const logPath = (kind, port) => path.join(logDir, `serve-${port}.${kind}`)
-    const isDead = entry => entry.child.exitCode !== null || entry.child.signalCode !== null
+    const isDead = entry => entry.spawnError !== undefined || entry.child.exitCode !== null || entry.child.signalCode !== null
 
     /** declaredPort 是判据用来探活/取日志的端口；bindPort 是它真正去绑的端口。 */
     function spawnServe(declaredPort, bindPort) {
@@ -78,8 +78,13 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
         })
         fs.closeSync(out)
         fs.closeSync(err)
-        fs.writeFileSync(logPath('pid', declaredPort), `${child.pid}\n`)
-        const entry = { port: declaredPort, pid: child.pid, child }
+        if (child.pid) fs.writeFileSync(logPath('pid', declaredPort), `${child.pid}\n`)
+        const entry = { port: declaredPort, pid: child.pid, child, spawnError: undefined }
+        // spawn 失败（可执行文件不对等）只发 'error' 事件：不接住就是未处理异常，
+        // 接住了也要让它算「已死」，否则探活会一直说进程还在
+        child.on('error', error => {
+            entry.spawnError = String(error?.message || error)
+        })
         children.push(entry)
     }
 
@@ -122,7 +127,10 @@ export function createMockDriver({ scenario = 'ok', cookie = '' }) {
                 env: { ...process.env, LIBMSSDK_STATE_DIR: stateDir, LIBMSSDK_BDMS_MODULE: MOCK_BDMS, LIBMSSDK_COOKIE: cookie },
                 stdio: 'ignore',
             })
-            await new Promise(resolve => preflight.on('exit', resolve))
+            await new Promise(resolve => {
+                preflight.on('exit', resolve)
+                preflight.on('error', resolve)
+            })
 
             origin = await startUpstream()
             const [first, second] = await allocatePorts(2)
