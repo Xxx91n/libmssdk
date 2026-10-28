@@ -109,10 +109,10 @@ test(`${PROCESS_COUNT} 个进程同时首次启动 ${ROUNDS} 轮：设备号始�
                 `第 ${round} 轮有进程没把身份落在文件上`,
             )
             const stored = readStoredIdentity(dir)
-            assert.equal(stored.device_id, results[0].deviceId, `第 ${round} 轮磁盘上的设备号和进程读到的不一致`)
-            assert.equal(stored.fp, stored.device_id, `第 ${round} 轮 fp 没跟 device_id 成套`)
+            assert.equal(stored.device_id, results[0].deviceId, `第 ${round} 轮磁盘上的设备号和进程读到的不一致${seen}`)
+            assert.equal(stored.fp, stored.device_id, `第 ${round} 轮 fp 没跟 device_id 成套${seen}`)
             // 没有临时文件、没有 .corrupt、没有第二份：目录里就只有那一个身份文件
-            assert.deepEqual(fs.readdirSync(dir), ['identity.json'], `第 ${round} 轮状态目录里不止一个文件`)
+            assert.deepEqual(fs.readdirSync(dir), ['identity.json'], `第 ${round} 轮状态目录里不止一个文件${seen}`)
         } finally {
             fs.rmSync(dir, { recursive: true, force: true })
         }
@@ -185,6 +185,30 @@ test('身份文件读不动时不挪走它：没读到过内容的东西不能�
         assert.ok(
             notes.some(item => item.level === 'warn'),
             `读不动要留下告警：${JSON.stringify(notes)}`,
+        )
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+    }
+})
+
+test('坏文件挪不动时不重建：留在原地、用内存里的设备号并告警', () => {
+    const dir = tempStateDir()
+    try {
+        fs.writeFileSync(identityFile(dir), '{ 设备号都不合法')
+        // 挪过去的目标位置被一个目录占住：rename 只会报错，不会成功
+        fs.mkdirSync(`${identityFile(dir)}.corrupt`)
+        const notes = []
+        const prepared = prepareStoredIdentity({
+            dir,
+            readBudgetMs: 30,
+            log: (event, detail) => notes.push(detail),
+        })
+        assert.equal(prepared.persisted, false, '挪不动时不该假装身份已经落盘')
+        assert.equal(readStoredIdentity(dir), null)
+        assert.equal(fs.readFileSync(identityFile(dir), 'utf8'), '{ 设备号都不合法', '挪不动就该原样留在原地')
+        assert.ok(
+            notes.some(item => item.reason === 'stuck'),
+            `挪不动要留下告警：${JSON.stringify(notes)}`,
         )
     } finally {
         fs.rmSync(dir, { recursive: true, force: true })
