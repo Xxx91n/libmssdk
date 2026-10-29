@@ -28,8 +28,8 @@ after(async () => {
     for (const server of servers) await new Promise(resolve => server.close(resolve))
 })
 
-async function serve(pool, options = {}) {
-    const server = createDispatcher({ config, pool, log: () => {}, ...options })
+async function serve(pool, limits = {}) {
+    const server = createDispatcher({ config: { ...config, ...limits }, pool, log: () => {} })
     servers.push(server)
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
     const { port } = server.address()
@@ -148,8 +148,6 @@ test('超出等待预算：客户端读到的是那个 503 与等待时长，不
     assert.match(text, /"retry_after_seconds":1/)
 })
 
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
-
 test('队列有上限：排不下的当场拒，而不是无限堆积到大家一起超时', async () => {
     const pool = fakePool({ size: 1 })
     const { baseUrl } = await serve(pool, { waitBudgetMs: 5000, queueLimit: 1 })
@@ -158,17 +156,20 @@ test('队列有上限：排不下的当场拒，而不是无限堆积到大家�
     held.run({ url: 'https://api.qishui.com/held' })
     await until(() => pool.requests.length === 1, '占位请求进入 worker')
 
-    const queued = post(baseUrl, signPayload())
-    await delay(50)
-    const overflow = await post(baseUrl, signPayload())
-    assert.equal(overflow.status, 503, '队列满了就立刻拒，不收留第三个等待者')
-    assert.match(overflow.text, /"code":"BUSY"/)
-    assert.equal(overflow.headers.get('retry-after'), '1')
+    // 谁先到不由我们定，所以断言的是「两条里恰好一条被当场拒」，而不是「第二条被拒」
+    const a = post(baseUrl, signPayload())
+    const b = post(baseUrl, signPayload())
+    const early = await Promise.race([a, b])
+    assert.equal(early.status, 503, '队列只有 1 个位置，第二条不该被收留')
+    assert.match(early.text, /"code":"BUSY"/)
+    assert.equal(early.headers.get('retry-after'), '1')
 
     pool.complete(held.id, { kind: 'SUCCESS', body: signedBody() })
     await until(() => pool.requests.length === 2, '腾出的槽位接住排着的那一条')
     pool.complete(pool.requests[1].slotId, { kind: 'SUCCESS', body: signedBody() })
-    assert.equal((await queued).status, 200, '排到队的那一条不该被误杀')
+
+    const settled = await Promise.all([a, b])
+    assert.deepEqual(settled.map(entry => entry.status).sort(), [200, 503], '一条等到服务，一条当场被拒')
 })
 
 test('错误各回各的码：鉴权失败、请求非法、worker 算错、模块没加载，都不是 502', async () => {

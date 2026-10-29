@@ -54,7 +54,7 @@ async function startReal({ workers, unstableCalls = 0, signDelayMs = 0, deviceId
     }
     if (stateDir) env.LIBMSSDK_STATE_DIR = stateDir
     if (deviceId === null) delete env.LIBMSSDK_DEVICE_ID
-    const entry = startDispatcher({
+    const entry = await startDispatcher({
         config,
         env,
         log: (event, detail) => notes.push({ event, detail }),

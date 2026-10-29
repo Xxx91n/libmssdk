@@ -8,6 +8,8 @@
 //
 // 不传 socket 句柄：Node 现行文档写明不支持在 Windows 上发送 IPC socket，Windows 上逐连接
 // 句柄分发的问题多年未修。这里转的是请求（上限沿用 256 KB）与响应（约 1 KB）的字节。
+//
+// 等待预算与队列上限只从 config 来：同一数字有两个来源（参数 + 环境变量）迟早会对不上。
 
 import http from 'node:http'
 import { fork } from 'node:child_process'
@@ -16,7 +18,7 @@ import { fileURLToPath } from 'node:url'
 import { isAuthorized } from './auth.mjs'
 import { maskDeviceId } from './config.mjs'
 import { errorResponse, normalizeSignRequest, ValidationError } from './contract.mjs'
-import { Queue, deriveWorkerCount, parsePositiveInt, shouldReject } from './dispatch.mjs'
+import { GIVE_UP_WINDOW_MS, Queue, deriveWorkerCount, parsePositiveInt, shouldReject } from './dispatch.mjs'
 import { ERROR_KINDS, failureResponse } from './errors.mjs'
 import { logEvent } from './log.mjs'
 import { createWorkerPool } from './workerpool.mjs'
@@ -79,14 +81,10 @@ function prebuildBusy() {
     }
 }
 
-export function createDispatcher({
-    config,
-    pool,
-    waitBudgetMs = DEFAULT_WAIT_BUDGET_MS,
-    queueLimit = Math.max(1, pool.size * QUEUE_LIMIT_PER_WORKER),
-    closeGraceMs = CLOSE_GRACE_MS,
-    log = logEvent,
-} = {}) {
+export function createDispatcher({ config, pool, log = logEvent } = {}) {
+    const waitBudgetMs = parsePositiveInt(config.waitBudgetMs, DEFAULT_WAIT_BUDGET_MS)
+    const queueLimit = parsePositiveInt(config.queueLimit, pool.size * QUEUE_LIMIT_PER_WORKER)
+    const closeGraceMs = parsePositiveInt(config.closeGraceMs, CLOSE_GRACE_MS)
     const queue = new Queue(queueLimit)
     const busy503 = prebuildBusy()
 
@@ -293,10 +291,14 @@ export function forkWorker(index, env = process.env) {
 /**
  * 组装生产形态的分发器：算出 worker 数、把来由打进日志、建池子、建服务。
  *
- * 这一票还没人调它 —— 默认路径仍是 src/server.mjs，切线是 #7。端口由调用方 listen，
- * worker 在后台一台一台预热；一台都没就绪时服务回的是那个 503，不是「端口没人应」。
+ * 这一票还没人调它 —— 默认路径仍是 src/server.mjs，切线是 #7。
+ *
+ * 先等池子把每一台 worker 的冷启动说完再返回：中途有一台死掉时，`child_process` 会 reject
+ * 它的 promise，而 fork 出来的那个是主进程的 event emitter —— 一个没人接的 rejection 在
+ * 启动路径上就是未处理异常，会把整个服务（连同别的 worker）一起掀掉。
+ * 端口由调用方在这之后 listen；一台都没就绪时服务回的是那个 503，不是「端口没人应」。
  */
-export function startDispatcher({
+export async function startDispatcher({
     config,
     env = process.env,
     log = logEvent,
@@ -309,8 +311,10 @@ export function startDispatcher({
         override: (env.LIBMSSDK_WORKERS || '').trim(),
         parallelism,
     })
-    const waitBudgetMs = parsePositiveInt(env.LIBMSSDK_WAIT_BUDGET_MS, DEFAULT_WAIT_BUDGET_MS)
-    const queueLimit = parsePositiveInt(env.LIBMSSDK_QUEUE_LIMIT, count * QUEUE_LIMIT_PER_WORKER)
+    const limits = {
+        waitBudgetMs: parsePositiveInt(env.LIBMSSDK_WAIT_BUDGET_MS, DEFAULT_WAIT_BUDGET_MS),
+        queueLimit: parsePositiveInt(env.LIBMSSDK_QUEUE_LIMIT, count * QUEUE_LIMIT_PER_WORKER),
+    }
 
     const pool = createWorkerPool({
         workerCount: count,
@@ -318,12 +322,11 @@ export function startDispatcher({
         log,
         onGiveUp,
         respawnBaseMs: parsePositiveInt(env.LIBMSSDK_WORKER_RESPAWN_BASE_MS, 1000),
-        respawnCapMs: parsePositiveInt(env.LIBMSSDK_WORKER_RESPAWN_CAP_MS, 60_000),
+        respawnCapMs: parsePositiveInt(env.LIBMSSDK_WORKER_RESPAWN_CAP_MS, GIVE_UP_WINDOW_MS),
     })
     // 实际值与来由都要说出来：绑定地址一变进程数就变，日志不写就等于让人猜。
-    log('dispatcher', { workers: count, reason, waitBudgetMs, queueLimit, bind: config.host })
+    log('dispatcher', { workers: count, reason, ...limits, bind: config.host })
 
-    const server = createDispatcher({ config, pool, waitBudgetMs, queueLimit, log })
-    const started = pool.start().catch(error => log('dispatcher-start-failed', { message: String(error?.message || error) }))
-    return { server, pool, started }
+    await pool.start()
+    return { server: createDispatcher({ config: { ...config, ...limits }, pool, log }), pool }
 }
