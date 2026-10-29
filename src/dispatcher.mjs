@@ -124,7 +124,7 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
     }
 
     function writeBusy(item, reason) {
-        if (item.closed) return
+        if (isGone(item)) return
         log('busy', {
             ...item.shape,
             reason,
@@ -141,7 +141,7 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
 
     /** `close` 用在「这条连接的请求体都读不完」那种情况：留着 keep-alive 只会把框架搞乱。 */
     function writeFailure(item, failure, { close = false } = {}) {
-        if (item.closed) return
+        if (isGone(item)) return
         log('sign-failed', { ...item.shape, code: failure.body.code, reason: failure.body.error })
         const body = JSON.stringify(failure.body)
         item.response.writeHead(failure.status, {
@@ -155,7 +155,7 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
     }
 
     function writeResult(item, slot, outcome) {
-        if (item.closed) return
+        if (isGone(item)) return
         // queuedMs 是「在队列里躺着」的那一段，不含 worker 自己算的时间
         const queuedMs = item.enqueuedAt && item.leasedAt ? item.leasedAt - item.enqueuedAt : 0
         log('sign', {
@@ -199,10 +199,24 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
         )
     }
 
-    /** 有槽位空出来就清队列：先进先出，队头超预算之前它一直是队头。 */
+    /**
+     * 有槽位空出来就清队列：先进先出，队头超预算之前它一直是队头。
+     *
+     * close 监听已经把挂断的连接从队列里摘走了；这里再问一次连接本身的状态，是因为
+     * 「服务端知道连接断了」和「客户端已经断了」之间隔着一次网络事件 —— Linux 上实测
+     * 这个间隔能让一次派发落到已经死掉的连接上。两条都认，才不会出现「活着的人排不进去」。
+     */
+    function isGone(item) {
+        return item.closed || item.response.destroyed
+    }
+
     function drain() {
         while (queue.depth > 0) {
             const item = queue.peek()
+            if (isGone(item)) {
+                queue.shift()
+                continue
+            }
             const slot = pool.lease()
             if (!slot) return
             queue.shift()
