@@ -167,10 +167,6 @@ export function createDispatcher({
     /** 有槽位空出来就清队列：先进先出，队头超预算之前它一直是队头。 */
     function drain() {
         while (queue.depth > 0) {
-            if (pool.blocker) {
-                rejectAll('签名模块不可用')
-                return
-            }
             const item = queue.peek()
             if (item.closed) {
                 queue.shift()
@@ -180,14 +176,6 @@ export function createDispatcher({
             if (!slot) return
             queue.shift()
             assign(item, slot)
-        }
-    }
-
-    function rejectAll(reason) {
-        for (;;) {
-            const item = queue.shift()
-            if (!item) return
-            writeBusy(item, reason)
         }
     }
 

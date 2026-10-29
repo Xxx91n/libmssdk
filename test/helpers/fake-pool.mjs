@@ -46,19 +46,9 @@ export function fakePool({ size = 1, ready = true, blocker = null } = {}) {
             slot.busy = false
             events.emit('available')
         },
-        fail(slotId, error) {
-            inFlight.get(slotId)?.reject(error)
-            inFlight.delete(slotId)
-            const slot = slots.find(candidate => candidate.id === slotId)
-            slot.busy = false
-            events.emit('available')
-        },
         /** 谁还在飞：分发器排队的用例要靠它确认「真的没被偷偷派发」。 */
         busyCount() {
             return slots.filter(slot => slot.busy).length
-        },
-        pendingCount() {
-            return inFlight.size
         },
         start: async () => {},
         stop: async () => {},
@@ -66,6 +56,7 @@ export function fakePool({ size = 1, ready = true, blocker = null } = {}) {
     return pool
 }
 
+/** 假 worker 算出来的响应体：url 回显请求，用例才能确认「交回来的就是这一次算的」。 */
 export const signedBody = (url = 'https://api.qishui.com/x') => ({
     ok: true,
     headers: { 'X-Helios': 'h', 'X-Medusa': 'm' },
