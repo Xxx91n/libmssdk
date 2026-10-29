@@ -7,10 +7,9 @@
 // 身份：worker 只读身份文件（readStoredIdentity），这条路径上没有创建。多进程首次启动不该分裂
 // 出两个设备号，那是主进程 fork 之前用独占创建收敛好的事（见 src/identity.mjs）。
 
-import os from 'node:os'
 import path from 'node:path'
 import { BdmsSigner } from './bdms.mjs'
-import { PROJECT_ROOT, resolveBdmsModule } from './config.mjs'
+import { resolveBdmsModule } from './config.mjs'
 import { parsePositiveInt } from './dispatch.mjs'
 import { signResponse } from './contract.mjs'
 import { ERROR_KINDS } from './errors.mjs'
@@ -55,19 +54,11 @@ function send(message) {
 }
 
 /**
- * 部署者机器上的路径候选：报错原文里可能出现的不止 modulePath 一个 —— require 失败还会带上
- * 依赖所在的目录，容器里还常有 cwd 与 home 的短形。
- */
-function machinePaths(modulePath) {
-    return [modulePath, path.dirname(modulePath), PROJECT_ROOT, process.cwd(), os.homedir()].filter(Boolean)
-}
-
-/**
  * 报错文本要能进日志也能回给调用方，所以先过一遍本机路径脱敏。
  */
 function describeError(error, modulePath) {
     const text = String(error?.message || error || '未知错误')
-    return redactMachinePaths(text, machinePaths(modulePath)).slice(0, 200)
+    return redactMachinePaths(text, [modulePath, path.dirname(modulePath)]).slice(0, 200)
 }
 
 /**
