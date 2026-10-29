@@ -19,6 +19,7 @@ deploy/              Docker 一键部署（Wine + Windows 版 Node）
 src/config.mjs       环境变量、客户端目录、bdms 路径、身份状态
 src/bdms.mjs         bdms.node 加载 / init / 签名；headers 展开和解析纯函数
 src/contract.mjs     SignRequest 校验和 SignResponse 组装
+src/errors.mjs       失败分类：状态码 / 原因码映射表与等待时长（纯函数，尚未接线）
 src/probe.mjs        track_v2 真机自检和整曲 / 试听判定
 src/server.mjs       HTTP 路由
 src/index.mjs        CLI：serve / bridge / selftest / probe / config
