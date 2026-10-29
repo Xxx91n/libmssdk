@@ -146,6 +146,10 @@ npm test
 
 CI 使用 mock 签名模块，不依赖官方二进制。
 
+另有一条**手动执行**的部署形态验证（不进 `npm test`、不进 CI）：
+`bash verify/wine-multi/run.sh` 检查 Docker + Wine 下多个进程能否同时工作，
+没有 Docker 和凭据时可用 `--mode mock` 彩排，见 [`verify/wine-multi/README.md`](verify/wine-multi/README.md)。
+
 ## 许可与合规
 
 `src/`、`deploy/`、`test/` 和文档源码使用 MIT，见 [`LICENSE`](LICENSE)。

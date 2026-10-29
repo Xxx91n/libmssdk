@@ -1,0 +1,2 @@
+# 这些脚本要在 Linux / WSL / Wine 容器里执行，必须是 LF
+* text eol=lf
