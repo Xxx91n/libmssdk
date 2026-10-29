@@ -11,9 +11,16 @@ export class FakeWorker extends EventEmitter {
         this.id = `worker-${index}`
         this.sent = []
         this.killed = []
+        this.exited = false
     }
 
+    /**
+     * 真 child_process 对已关闭的通道 send 不是返回 false 就完事：它会在 process 上发一个
+     * 'error' 事件（ERR_IPC_CHANNEL_CLOSED）。没有 error 监听就整个主进程被掀掉，所以假传输
+     * 也照样抛 —— 不然「关池子时别再碰死通道」这条判据就测不出来。
+     */
     send(message) {
+        if (this.exited) throw new Error(`${this.id} 的 IPC 通道已关闭`)
         this.sent.push(message)
         return true
     }

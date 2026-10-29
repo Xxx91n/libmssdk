@@ -19,7 +19,8 @@ async function waitFor(condition, describe) {
     throw new Error(`等不到：${describe}`)
 }
 
-function healthy(count, { respawnBaseMs = 1, respawnCapMs = 2, log = () => {}, onGiveUp = () => {}, autoReady = true } = {}) {
+const healthy = (count, options = {}) => {
+    const { respawnBaseMs = 1, respawnCapMs = 2, onGiveUp = () => {}, autoReady = true } = options
     const workers = []
     const spawnOrder = []
     const notes = []
@@ -122,11 +123,9 @@ test('反复退出就把等待时间翻倍，而不是每次隔同样的时间�
     // 每台重生出来的都没就绪过就又退出：失败次数累计，退避跟着翻倍
     for (let index = 0; index < 3; index += 1) {
         workers.at(-1).exit(1)
-        const before = spawnOrder.length
-        await delay(1)
-        assert.equal(spawnOrder.length, before, '退避没到就重生，等于让坏掉的机器一直占着 CPU')
-        await waitFor(() => spawnOrder.length === before + 1, `第 ${index + 1} 次重生`)
-        // 重生出来的这台立刻再退：失败次数不清零
+        // 重生排在 setTimeout 里，同一个 tick 内绝不可能已经拉起来：这条不需要靠 sleep 去赶
+        assert.equal(spawnOrder.length, index + 1, '退避没到就重生，等于让坏掉的机器一直占着 CPU')
+        await waitFor(() => spawnOrder.length === index + 2, `第 ${index + 1} 次重生`)
     }
     const delays = notes.filter(note => note.event === 'worker-respawn').map(note => note.detail.delayMs)
     assert.deepEqual(delays, [5, 10, 20], '1 秒起翻倍的节奏（这里用毫秒测试），封顶由 backoffDelayMs 管')
@@ -256,4 +255,24 @@ test('worker 的失败原因原样交回分发器：真池子不能比假池子�
     assert.equal(outcome.kind, 'INTERNAL_ERROR')
     assert.equal(outcome.message, '签名不完整：只拿到 0 个头', '这句是排查时唯一能看到的东西，不能在半路丢掉')
     await pool.stop()
+})
+
+test('退避途中关池子：不再对已经没了的通道 send', async () => {
+    // 重生要等 50ms，所以 stop 落在「进程已死、新进程还没拉起来」那个窗口里
+    const { pool, workers } = healthy(2, { autoReady: true, respawnBaseMs: 50 })
+    await pool.start()
+
+    const dead = workers[0]
+    dead.exit(1)
+    await pool.stop()
+
+    assert.equal(
+        dead.sent.some(message => message.type === 'shutdown'),
+        false,
+        '对已关闭的 IPC 通道 send 会变成 process 的 error 事件，把整个主进程掀掉',
+    )
+    assert.ok(
+        workers.some(worker => worker.sent.some(message => message.type === 'shutdown')),
+        '活着的那台要收到关闭指令，不能因为跳过死的就谁都跳过',
+    )
 })

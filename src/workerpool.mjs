@@ -209,6 +209,9 @@ export function createWorkerPool({
             timers.clear()
             for (const slot of slots) {
                 reclaim(slot)
+                // 死在退避窗口里的槽位手上还是那个已关闭的通道：对它 send 不是返回 false 就完事，
+                // Node 会在 process 上发一个 'error' 事件，把整个主进程掀掉。关池子时跳过。
+                if (slot.dead) continue
                 slot.transport.send({ type: 'shutdown' })
             }
         },
