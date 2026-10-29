@@ -75,7 +75,7 @@ test('模块抛得飞快时不许空转：连着几次抛就收，别把一颗�
     })
     assert.equal(result.ready, false)
     assert.equal(result.spun, true, '时钟一次没走 = 调用根本没在做事，这才叫空转')
-    assert.equal(result.thrown, 5, '第 5 次抛就停')
+    assert.equal(result.stalled, 5, '第 5 次无进展就停')
     assert.equal(calls, 5, '时钟一次都没走，也不该一直签下去')
     assert.match(result.reason, /bdms\.node 不存在/, '把抛出来的原因带回去')
 })
@@ -111,4 +111,20 @@ test('只是慢、不是坏：每次抛都花几百毫秒时继续采样到预�
     assert.equal(result.ready, false)
     assert.match(result.reason, /没收敛/)
     assert.equal(calls, 10, '10 次慢抛之后预算才用完')
+})
+
+test('不抛错但一直过不了结构下限，也是空转：不能让它把整份预算烧穿', () => {
+    let calls = 0
+    const result = settleWarmup({
+        budgetMs: 30_000,
+        now: () => 0,
+        // 两次都在、值却不是签名该有的形状：不抛错，但判据永远不往前走
+        sample: () => {
+            calls += 1
+            return ['不是 base64', '也不是 base64']
+        },
+    })
+    assert.equal(result.ready, false)
+    assert.equal(result.spun, true, '每次采样只花几微秒 —— 这就是没在做事')
+    assert.equal(calls, 5, '五轮无进展就收，不拿 30 秒把一颗核烧穿')
 })

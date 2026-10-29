@@ -44,46 +44,53 @@ export function nextWarmup(state, values) {
     return { state: { streak, total, ready: streak >= REQUIRED_SAMPLES }, ready: streak >= REQUIRED_SAMPLES }
 }
 
-/** 连着几次「这一下直接抛」就停：那不是预热窗口，是坏了。 */
-const MAX_THROWN_SAMPLES = 5
+/** 连着几次采样毫无进展就考虑收手：那不是预热窗口，是坏了。 */
+const MAX_STALLED_SAMPLES = 5
 
 /**
- * 判「空转」的时间窗：5 次抛如果只花了这一点点时间，说明调用根本没在做事。
+ * 一次「有代价的」采样至少要花多少毫秒。
  *
- * 反过来，每次抛都要几百毫秒（模块确实在初始化）就不是空转，该继续采样到预算用完 ——
- * 一上来就收工会让一个只是慢的模块永久停在未就绪。
+ * 真模块签一次名要一百到几百毫秒，所以「同样的进展反复出现」是冷启动的正常现象，必须继续试。
+ * 每次只要几微秒就说明调用根本没在做事 —— 那时不拦，就会拿整份预算把一颗核烧穿，
+ * 还顺着逐台预热把后面的 worker 一起堵住。
  */
-const SPIN_WINDOW_MS = 1000
+const MIN_USEFUL_SAMPLE_MS = 10
 
 /**
  * 用固定探针循环采样，直到判据说「稳了」。
  *
- * sample 与 now 都是传进来的：真模块一次签名要一两百毫秒，循环本身就是节奏，不需要 sleep；
- * 但模块抛得飞快时（配置坏了、原生模块加载不了）这个前提就不成立了，不拦就会拿整份预算
- * 把一颗核空转掉，还顺着逐台预热把后面的 worker 一起堵住。
+ * sample 与 now 都从参数进来：时钟不做成接缝，测试给一个假时钟就能把两条收手路径钉死。
  */
 export function settleWarmup({ sample, budgetMs, now = Date.now }) {
     const deadline = now() + budgetMs
     let state = WARMUP_START
-    let thrown = 0
-    let firstThrowAt = 0
+    let stalled = 0
+    let stalledFrom = 0
     let lastError = ''
     for (;;) {
         let values = []
         try {
             values = sample()
-            thrown = 0
         } catch (error) {
-            if (thrown === 0) firstThrowAt = now()
-            thrown += 1
             lastError = String(error?.message || error)
         }
+        const before = state
         const step = nextWarmup(state, values)
         state = step.state
         if (step.ready) return { ready: true }
-        if (thrown >= MAX_THROWN_SAMPLES && now() - firstThrowAt < SPIN_WINDOW_MS) {
-            return { ready: false, reason: lastError, thrown, spun: true }
+        // 「有进展」= 这份采样被判据认作一次有效计数：连续同长的轨迹往前走了
+        const progressed = state.streak !== before.streak || state.total !== before.total
+        if (progressed) {
+            stalled = 0
+        } else {
+            if (stalled === 0) stalledFrom = now()
+            stalled += 1
         }
-        if (now() >= deadline) return { ready: false, reason: `预热 ${budgetMs}ms 内输出长度没收敛`, thrown }
+        if (stalled >= MAX_STALLED_SAMPLES && (now() - stalledFrom) / stalled < MIN_USEFUL_SAMPLE_MS) {
+            return { ready: false, reason: lastError || '输出一直过不了结构下限', stalled, spun: true }
+        }
+        if (now() >= deadline) {
+            return { ready: false, reason: `预热 ${budgetMs}ms 内输出长度没收敛`, stalled }
+        }
     }
 }

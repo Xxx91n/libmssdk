@@ -53,9 +53,6 @@ function send(message) {
     process.send(message)
 }
 
-/**
- * 报错文本要能进日志也能回给调用方，所以先过一遍本机路径脱敏。
- */
 /** 报错文本要能进日志也能回给调用方，所以先过一遍本机路径脱敏，再截断。 */
 function mask(text, modulePath) {
     return redactMachinePaths(String(text || '未知错误'), [modulePath, path.dirname(modulePath)]).slice(0, 200)
