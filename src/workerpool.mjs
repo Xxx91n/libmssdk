@@ -224,11 +224,17 @@ export function createWorkerPool({
             return {
                 id: slot.id,
                 run(request) {
-                    // lease 与 run 之间一般没有事件循环，但通道坏了的时候这一句就是最后一道：
-                    // 同步 throw 会从 drain() 里逃出去，变成主进程的未处理异常
+                    // lease 与 run 之间一般没有事件循环，但通道坏了的时候这一道不算完：
+                    // 真 send 失败可能是同步抛出，而抛出会逃出 drain()，把这条连接永远悬在忙
                     if (slot.dead) return Promise.reject(new WorkerLost(slot.id))
                     const id = `r${(requests += 1)}`
-                    slot.transport.send({ type: 'sign', id, request })
+                    try {
+                        slot.transport.send({ type: 'sign', id, request })
+                    } catch (error) {
+                        log('worker-send-failed', { id: slot.id, message: redactMachinePaths(String(error?.message || error)) })
+                        gone(slot)
+                        return Promise.reject(new WorkerLost(slot.id))
+                    }
                     return new Promise((resolve, reject) => {
                         slot.pending.set(id, { resolve, reject })
                     })

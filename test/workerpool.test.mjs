@@ -360,3 +360,18 @@ test('旧进程迟到的事件不能杀掉替补：一台进程的事件只认�
     )
     await pool.stop()
 })
+
+test('派出去的 send 当场抛了也不把槽位悬在忙：按这台没了处理', async () => {
+    const { pool, workers } = healthy(1)
+    await pool.start()
+
+    const slot = pool.lease()
+    const dead = workers.at(-1)
+    dead.exited = true // 通道已经关了：真 child_process 这时 send 会抛，而不是返回 false
+    const outcome = await slot.run(job).catch(reason => reason)
+
+    assert.equal(outcome?.kind, 'INTERNAL_ERROR', '调用方拿到错误分类，不是永远等')
+    assert.equal(pool.readyCount, 0, '这台按没了处理，不再挂着就绪')
+    assert.equal(pool.busyCount, 0, '槽位没有被悬住在忙')
+    await pool.stop()
+})
