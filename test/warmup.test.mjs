@@ -74,6 +74,7 @@ test('模块抛得飞快时不许空转：连着几次抛就收，别把一颗�
         },
     })
     assert.equal(result.ready, false)
+    assert.equal(result.spun, true, '时钟一次没走 = 调用根本没在做事，这才叫空转')
     assert.equal(result.thrown, 5, '第 5 次抛就停')
     assert.equal(calls, 5, '时钟一次都没走，也不该一直签下去')
     assert.match(result.reason, /bdms\.node 不存在/, '把抛出来的原因带回去')
@@ -93,4 +94,21 @@ test('预算用完还没收敛：报的是「没等到稳态」，进程照旧�
     assert.equal(result.ready, false)
     assert.match(result.reason, /预热 1000ms 内输出长度没收敛/)
     assert.equal(calls, 10, '采满预算就停，不许多跑')
+})
+
+test('只是慢、不是坏：每次抛都花几百毫秒时继续采样到预算用完，别提前判死', () => {
+    let calls = 0
+    const result = settleWarmup({
+        budgetMs: 3000,
+        // 真模块冷启动里「抛一次」本身就是一次几百毫秒的调用，时钟跟着调用走
+        now: () => calls * 300,
+        sample: () => {
+            calls += 1
+            throw new Error('原生模块还在初始化')
+        },
+    })
+    assert.equal(result.spun, undefined, '调用是有代价的，就不算空转：要一直试到预算用完')
+    assert.equal(result.ready, false)
+    assert.match(result.reason, /没收敛/)
+    assert.equal(calls, 10, '10 次慢抛之后预算才用完')
 })

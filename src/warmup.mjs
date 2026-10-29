@@ -48,6 +48,14 @@ export function nextWarmup(state, values) {
 const MAX_THROWN_SAMPLES = 5
 
 /**
+ * 判「空转」的时间窗：5 次抛如果只花了这一点点时间，说明调用根本没在做事。
+ *
+ * 反过来，每次抛都要几百毫秒（模块确实在初始化）就不是空转，该继续采样到预算用完 ——
+ * 一上来就收工会让一个只是慢的模块永久停在未就绪。
+ */
+const SPIN_WINDOW_MS = 1000
+
+/**
  * 用固定探针循环采样，直到判据说「稳了」。
  *
  * sample 与 now 都是传进来的：真模块一次签名要一两百毫秒，循环本身就是节奏，不需要 sleep；
@@ -58,6 +66,7 @@ export function settleWarmup({ sample, budgetMs, now = Date.now }) {
     const deadline = now() + budgetMs
     let state = WARMUP_START
     let thrown = 0
+    let firstThrowAt = 0
     let lastError = ''
     for (;;) {
         let values = []
@@ -65,13 +74,16 @@ export function settleWarmup({ sample, budgetMs, now = Date.now }) {
             values = sample()
             thrown = 0
         } catch (error) {
+            if (thrown === 0) firstThrowAt = now()
             thrown += 1
             lastError = String(error?.message || error)
         }
         const step = nextWarmup(state, values)
         state = step.state
         if (step.ready) return { ready: true }
-        if (thrown >= MAX_THROWN_SAMPLES) return { ready: false, reason: lastError, thrown }
-        if (now() >= deadline) return { ready: false, reason: `预热 ${budgetMs}ms 内输出长度没收敛` }
+        if (thrown >= MAX_THROWN_SAMPLES && now() - firstThrowAt < SPIN_WINDOW_MS) {
+            return { ready: false, reason: lastError, thrown, spun: true }
+        }
+        if (now() >= deadline) return { ready: false, reason: `预热 ${budgetMs}ms 内输出长度没收敛`, thrown }
     }
 }
