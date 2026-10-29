@@ -197,6 +197,12 @@ test('错误各回各的码：鉴权失败、请求非法、worker 算错、模�
     assert.match(broken.text, /"code":"INTERNAL_ERROR"/)
     assert.match(broken.text, /签名不完整/, 'worker 那句原因要能走到调用方，否则线上只能看到一个笼统的 500')
 
+    // 体太长：客户端要读得到那句 400，而不是在上传中途拿到一个连接重置
+    const { baseUrl: cappedUrl } = await serve(fakePool({ size: 1 }), { maxBodyBytes: 64 })
+    const oversized = await post(cappedUrl, signPayload({ body: 'x'.repeat(4096) }))
+    assert.equal(oversized.status, 400, '超上限的请求体：回的是改请求，不是把连接掀了')
+    assert.match(oversized.text, /请求体超过 64 字节/)
+
     const blocked = fakePool({ size: 1, ready: false, blocker: 'SIGNER_UNAVAILABLE' })
     const { baseUrl: blockedUrl } = await serve(blocked, { waitBudgetMs: 5000 })
     const unavailable = await post(blockedUrl, signPayload())

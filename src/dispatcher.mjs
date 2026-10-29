@@ -20,7 +20,7 @@ import { maskDeviceId } from './config.mjs'
 import { errorResponse, normalizeSignRequest, ValidationError } from './contract.mjs'
 import { GIVE_UP_WINDOW_MS, Queue, deriveWorkerCount, parsePositiveInt, shouldReject } from './dispatch.mjs'
 import { ERROR_KINDS, failureResponse } from './errors.mjs'
-import { logEvent } from './log.mjs'
+import { logEvent, redactMachinePaths } from './log.mjs'
 import { createWorkerPool } from './workerpool.mjs'
 
 /** 客户端超时约 6 秒，留余量：预算是「还在服务里等」的时间，不包含它自己那头的网络时间。 */
@@ -32,6 +32,9 @@ const QUEUE_LIMIT_PER_WORKER = 4
 /** 503 写完之后的宽限：让字节先出去，别让客户端在上传中途读到连接重置。 */
 const CLOSE_GRACE_MS = 300
 
+/** 体太长：除了「改请求」，还要在回包之后把这条连接关掉（已经收不完的字节了）。 */
+class OversizeBody extends ValidationError {}
+
 function readBody(request, limit) {
     return new Promise((resolve, reject) => {
         const chunks = []
@@ -39,8 +42,10 @@ function readBody(request, limit) {
         request.on('data', chunk => {
             size += chunk.length
             if (size > limit) {
-                reject(new ValidationError(`请求体超过 ${limit} 字节`))
-                request.destroy()
+                // 不 destroy：客户端要读得到那句 400，而不是在上传中途拿到一个连接重置 ——
+                // 和超预算那个 503 同一个道理。剩下的字节继续从管道排掉，只是不再缓冲。
+                reject(new OversizeBody(`请求体超过 ${limit} 字节`))
+                request.resume()
                 return
             }
             chunks.push(chunk)
@@ -49,6 +54,7 @@ function readBody(request, limit) {
         request.on('error', reject)
     })
 }
+
 
 /** 只留请求形状：路径、方法、头数量、体字节数、脱敏设备号。Cookie 与签名值一律不落盘。 */
 function requestShape(spec, config) {
@@ -84,17 +90,23 @@ function prebuildBusy() {
 export function createDispatcher({ config, pool, log = logEvent } = {}) {
     const waitBudgetMs = parsePositiveInt(config.waitBudgetMs, DEFAULT_WAIT_BUDGET_MS)
     const queueLimit = parsePositiveInt(config.queueLimit, pool.size * QUEUE_LIMIT_PER_WORKER)
-    const closeGraceMs = parsePositiveInt(config.closeGraceMs, CLOSE_GRACE_MS)
     const queue = new Queue(queueLimit)
     const busy503 = prebuildBusy()
 
-    /** 把预拼好的那份 503 写到这条连接上，写完隔一小段再关。 */
+    /** 写完让字节先出去，再隔一小段才关：直接销毁会让客户端读到连接重置而不是这个回包。 */
+    function endAfterFlush(response) {
+        const socket = response.socket
+        if (socket && !socket.destroyed) {
+            socket.setTimeout(CLOSE_GRACE_MS, () => socket.end())
+        }
+    }
+
     function writeBusy(item, reason) {
         if (item.closed) return
         log('busy', {
             ...item.shape,
             reason,
-            queuedMs: Date.now() - item.startedAt,
+            queuedMs: item.enqueuedAt ? Date.now() - item.enqueuedAt : 0,
             depth: queue.depth,
             readyWorkers: pool.readyCount,
             waitBudgetMs,
@@ -102,13 +114,11 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
         const response = item.response
         response.writeHead(busy503.status, busy503.headers)
         response.end(busy503.body)
-        const socket = response.socket
-        if (socket && !socket.destroyed) {
-            socket.setTimeout(closeGraceMs, () => socket.end())
-        }
+        endAfterFlush(response)
     }
 
-    function writeFailure(item, failure) {
+    /** `close` 用在「这条连接的请求体都读不完」那种情况：留着 keep-alive 只会把框架搞乱。 */
+    function writeFailure(item, failure, { close = false } = {}) {
         if (item.closed) return
         log('sign-failed', { ...item.shape, code: failure.body.code, reason: failure.body.error })
         const body = JSON.stringify(failure.body)
@@ -116,8 +126,10 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
             ...failure.headers,
             'Content-Type': 'application/json; charset=utf-8',
             'Content-Length': Buffer.byteLength(body),
+            ...(close ? { Connection: 'close' } : {}),
         })
         item.response.end(body)
+        if (close) endAfterFlush(item.response)
     }
 
     function writeResult(item, slot, outcome) {
@@ -126,7 +138,7 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
             ...item.shape,
             worker: slot.id,
             elapsedMs: Date.now() - item.startedAt,
-            queuedMs: item.enqueuedAt - item.startedAt,
+            queuedMs: item.enqueuedAt ? Date.now() - item.enqueuedAt : 0,
         })
         const body = JSON.stringify(outcome.body)
         item.response.writeHead(200, {
@@ -229,6 +241,7 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
                     failureResponse(ERROR_KINDS.INVALID_REQUEST, {
                         message: error instanceof ValidationError ? error.message : '请求体不是合法 JSON',
                     }),
+                    { close: error instanceof OversizeBody },
                 )
                 return
             }
@@ -237,7 +250,7 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
                 request: spec,
                 response,
                 startedAt,
-                enqueuedAt: startedAt,
+                enqueuedAt: 0,
                 closed: false,
                 shape: requestShape(spec, config),
             }
@@ -259,12 +272,16 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
                 assign(item, slot)
                 return
             }
+            item.enqueuedAt = Date.now()
             if (!queue.push(item)) {
                 writeBusy(item, '队列已满')
                 return
             }
         } catch (error) {
-            log('dispatcher-error', { message: String(error?.message || error), path: url.pathname })
+            log('dispatcher-error', {
+                message: redactMachinePaths(String(error?.message || error), [config.bdmsModule, config.clientDir]),
+                path: url.pathname,
+            })
             if (!response.headersSent && !response.writableEnded) {
                 response.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })
                 response.end(JSON.stringify(failureResponse(ERROR_KINDS.INTERNAL_ERROR, { message: '内部错误' }).body))
@@ -285,7 +302,7 @@ const WORKER_PATH = fileURLToPath(new URL('./worker.mjs', import.meta.url))
 
 /** 真的拉一个 worker 进程。stdio 用继承：worker 自己的日志要落到容器日志里，不用再搭管道。 */
 export function forkWorker(index, env = process.env) {
-    return fork(WORKER_PATH, [], { env: { ...env, LIBMSSDK_WORKER_INDEX: String(index) } })
+    return fork(WORKER_PATH, [], { env })
 }
 
 /**
@@ -293,12 +310,12 @@ export function forkWorker(index, env = process.env) {
  *
  * 这一票还没人调它 —— 默认路径仍是 src/server.mjs，切线是 #7。
  *
- * 先等池子把每一台 worker 的冷启动说完再返回：中途有一台死掉时，`child_process` 会 reject
- * 它的 promise，而 fork 出来的那个是主进程的 event emitter —— 一个没人接的 rejection 在
- * 启动路径上就是未处理异常，会把整个服务（连同别的 worker）一起掀掉。
- * 端口由调用方在这之后 listen；一台都没就绪时服务回的是那个 503，不是「端口没人应」。
+ * 端口先开、worker 在后台一台一台预热：预热期间客户端要读到的是那个 503（带 Retry-After），
+ * 而不是「没人听这个端口」。反过来说，把 listen 等到所有 worker 预热完，最坏情况是
+ * workerCount × 30 秒的拒接窗口，编排器的起始宽限期就是这么被吃掉的。
+ * 预热一台都没起来时，分发器按「整体拒绝流量」回 503；配置错由 blocker 报成 500。
  */
-export async function startDispatcher({
+export function startDispatcher({
     config,
     env = process.env,
     log = logEvent,
@@ -327,6 +344,8 @@ export async function startDispatcher({
     // 实际值与来由都要说出来：绑定地址一变进程数就变，日志不写就等于让人猜。
     log('dispatcher', { workers: count, reason, ...limits, bind: config.host })
 
-    await pool.start()
-    return { server: createDispatcher({ config: { ...config, ...limits }, pool, log }), pool }
+    const server = createDispatcher({ config: { ...config, ...limits }, pool, log })
+    // start() 只会 resolve（每台 worker 的 settled 没有 reject 路径），但 spawn 本身可能同步抛
+    pool.start().catch(error => log('dispatcher-start-failed', { message: String(error?.message || error) }))
+    return { server, pool }
 }
