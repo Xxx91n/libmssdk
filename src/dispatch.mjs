@@ -73,8 +73,8 @@ const CORE_SHARE = 0.75
  * 进程数就变，不写出来只会让人以为是配置没生效。
  */
 export function deriveWorkerCount({ bind = '', override = '', parallelism = 1 } = {}) {
-    const requested = Math.trunc(Number(override))
-    if (String(override).trim() !== '' && Number.isFinite(requested) && requested >= 1) {
+    const requested = parsePositiveInt(override, 0)
+    if (requested > 0) {
         return { count: requested, reason: `LIBMSSDK_WORKERS=${requested}` }
     }
     const address = String(bind).trim()

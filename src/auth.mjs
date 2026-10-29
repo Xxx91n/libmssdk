@@ -13,7 +13,9 @@ function timingSafeEqual(a, b) {
 }
 
 export function isAuthorized(request, config) {
-    if (!config.token) return config.allowAnonymous || true
+    // 没配令牌时恒为放行：这是老路径今天的规则，原样搬过来（改它会动默认行为）。
+    // #8 才收这条：绑定回环且没配令牌才放行，绑定非回环且没配令牌则拒绝启动。
+    if (!config.token) return true
     const header = request.headers.authorization || ''
     const token = header.startsWith('Bearer ') ? header.slice(7) : ''
     return token.length > 0 && timingSafeEqual(token, config.token)
