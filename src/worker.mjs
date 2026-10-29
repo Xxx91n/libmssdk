@@ -53,6 +53,18 @@ function send(message) {
 }
 
 /**
+ * 报错文本要能进日志也能回给调用方，所以不能夹带本机路径。
+ *
+ * bdms.node 的加载失败原文里就写着 modulePath（`bdms.node 不存在：<绝对路径>`），
+ * 而这条路径属于部署者的机器 —— 约定是日志里只允许请求形状、签名长度和脱敏设备号。
+ */
+function describeError(error, modulePath) {
+    const text = String(error?.message || error || '未知错误')
+    const masked = modulePath ? text.split(modulePath).join('bdms.node') : text
+    return masked.slice(0, 200)
+}
+
+/**
  * 自学习预热：循环调用探针，直到连续几次输出的长度彼此相同。
  *
  * 判据里没有、也不该有任何绝对长度数字 —— 换一个客户端版本的原生模块，稳态长度就可能变，
@@ -67,7 +79,7 @@ function warmUp(signer, probe, budgetMs) {
             values = Object.values(signer.sign(probe).headers)
         } catch (error) {
             // 算不出来就当成一份不合格的采样：长度轨迹被打断，计数从零开始
-            logWarn('warmup-sign', { level: 'warn', message: String(error?.message || error) })
+            logWarn('warmup-sign', { level: 'warn', message: describeError(error, signer.modulePath) })
         }
         const step = nextWarmup(state, values)
         state = step.state
@@ -78,6 +90,7 @@ function warmUp(signer, probe, budgetMs) {
 
 function handleTask(signer, message) {
     const request = message.request || {}
+    const startedAt = Date.now()
     try {
         const signed = signer.sign({
             url: request.url,
@@ -88,7 +101,8 @@ function handleTask(signer, message) {
             type: 'result',
             id: message.id,
             kind: ERROR_KINDS.SUCCESS,
-            body: signResponse({ ...signed, elapsedMs: signed.elapsedMs ?? 0 }),
+            // elapsed_ms 是这一次计算的耗时：契约里这个字段本来就说的是算签名花了多久
+            body: signResponse({ ...signed, elapsedMs: Date.now() - startedAt }),
         })
     } catch (error) {
         // 这里只可能是「模块算完了但东西不对」（缺 X-Helios / 抛异常）：按内部算错收口。
@@ -97,7 +111,7 @@ function handleTask(signer, message) {
             type: 'result',
             id: message.id,
             kind: ERROR_KINDS.INTERNAL_ERROR,
-            message: String(error?.message || error),
+            message: describeError(error, signer.modulePath),
         })
     }
 }
@@ -115,7 +129,7 @@ function main() {
         try {
             signer.load()
         } catch (error) {
-            blockers.push(String(error?.message || error))
+            blockers.push(describeError(error, modulePath))
         }
     }
     if (blockers.length > 0) {
