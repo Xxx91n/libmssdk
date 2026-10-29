@@ -194,6 +194,7 @@ test('错误各回各的码：鉴权失败、请求非法、worker 算错、模�
     const broken = await inFlight
     assert.equal(broken.status, 500, 'worker 输出不对要按「必须有人来修」回，绝不能回没有签名的 200')
     assert.match(broken.text, /"code":"INTERNAL_ERROR"/)
+    assert.match(broken.text, /签名不完整/, 'worker 那句原因要能走到调用方，否则线上只能看到一个笼统的 500')
 
     const blocked = fakePool({ size: 1, ready: false, blocker: 'SIGNER_UNAVAILABLE' })
     const { baseUrl: blockedUrl } = await serve(blocked, { waitBudgetMs: 5000 })

@@ -38,6 +38,12 @@ export class FakeWorker extends EventEmitter {
         this.report({ type: 'result', id: task.id, kind, body: { ok: true, url: task.request.url }, ...extra })
     }
 
+    /** 按池子派下来的任务回一份失败：原因文本要能原样交回分发器。 */
+    reportFailure(kind, message) {
+        const task = this.task()
+        this.report({ type: 'result', id: task.id, kind, message })
+    }
+
     exit(code = 1) {
         this.emit('exit', code)
     }

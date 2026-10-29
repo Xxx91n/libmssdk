@@ -11,7 +11,7 @@
 
 import { EventEmitter } from 'node:events'
 import { ERROR_KINDS } from './errors.mjs'
-import { backoffDelayMs, shouldGiveUp } from './dispatch.mjs'
+import { GIVE_UP_WINDOW_MS, backoffDelayMs, shouldGiveUp } from './dispatch.mjs'
 
 /** 槽位没了（进程崩了 / 管道断了）：在飞的请求按「内部算错」收口，不能让调用方永远等。 */
 export class WorkerLost extends Error {
@@ -107,7 +107,8 @@ export function createWorkerPool({
             if (!waiter) return
             slot.pending.delete(message.id)
             slot.busy = false
-            waiter.resolve({ kind: message.kind, body: message.body })
+            // message 一起带上：worker 那句「签名不完整：只拿到 N 个头」是排查时唯一能看到的东西
+            waiter.resolve({ kind: message.kind, body: message.body, message: message.message })
             events.emit('available')
             return
         }
@@ -125,8 +126,13 @@ export function createWorkerPool({
         reclaim(slot)
         slot.settle()
         if (stopping) return
-        if (code !== 0) exits.push(Date.now())
-        if (shouldGiveUp(exits, Date.now())) {
+        if (code !== 0) {
+            // 只留窗口内那几次：这是一台要跑很多天的常驻进程，不能一直攒退出记录
+            const now = Date.now()
+            exits.push(now)
+            while (exits.length > 0 && now - exits[0] > GIVE_UP_WINDOW_MS) exits.shift()
+        }
+        if (shouldGiveUp(exits, Date.now(), { windowMs: GIVE_UP_WINDOW_MS })) {
             if (!givenUp) {
                 givenUp = true
                 log('worker-giveup', { exits: exits.length, code })

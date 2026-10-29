@@ -243,3 +243,17 @@ test('只要还可能自己好起来，就不冒充「机器坏了」：blocker 
     assert.equal(pool.blocker, null, '混着一种「也许重生就好」的失败，就按服务忙回')
     await pool.stop()
 })
+
+test('worker 的失败原因原样交回分发器：真池子不能比假池子少带一个字段', async () => {
+    const { pool, byId } = healthy(1)
+    await pool.start()
+
+    const slot = pool.lease()
+    const done = slot.run(job)
+    byId(slot.id).reportFailure('INTERNAL_ERROR', '签名不完整：只拿到 0 个头')
+
+    const outcome = await done
+    assert.equal(outcome.kind, 'INTERNAL_ERROR')
+    assert.equal(outcome.message, '签名不完整：只拿到 0 个头', '这句是排查时唯一能看到的东西，不能在半路丢掉')
+    await pool.stop()
+})

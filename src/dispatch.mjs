@@ -93,8 +93,11 @@ export function backoffDelayMs(failures, { baseMs = 1000, capMs = 60_000 } = {})
     return Math.min(capMs, baseMs * 2 ** (failures - 1))
 }
 
+/** 判「短时间反复退出」的窗口长度：池子修剪退出记录时要用同一个数，别各写一份 60000。 */
+export const GIVE_UP_WINDOW_MS = 60_000
+
 /** 60 秒窗口内退出 5 次就整体退出：无限重试只会把「机器坏了」拖成「谁都不知道坏了」。 */
-export function shouldGiveUp(exitTimesMs, nowMs, { windowMs = 60_000, limit = 5 } = {}) {
+export function shouldGiveUp(exitTimesMs, nowMs, { windowMs = GIVE_UP_WINDOW_MS, limit = 5 } = {}) {
     const recent = exitTimesMs.filter(at => nowMs - at <= windowMs)
     return recent.length >= limit
 }
