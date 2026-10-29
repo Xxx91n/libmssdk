@@ -99,11 +99,18 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
     const queue = new Queue(queueLimit)
     const busy503 = prebuildBusy()
 
-    /** 每条连接一个 item：closed 只在这里挂，漏挂就会往已经断开的连接上写回包。 */
+    /**
+     * 每条连接一个 item，close 监听挂在**返回的那个对象**上。
+     *
+     * 调用方要往返回值上继续加字段（request / startedAt），不能把展开后的副本丢掉再挂一次 ——
+     * 那样 closed 永远翻转不到被排队、被派发的那份，写出路径就会往已经断开的连接上写，
+     * 而它占着的那个排队位置也永远还不回来。
+     */
     function begin(response, shape) {
-        const item = { response, shape, startedAt: Date.now(), enqueuedAt: 0, closed: false }
+        const item = { response, shape, enqueuedAt: 0, closed: false }
         response.on('close', () => {
             item.closed = true
+            queue.remove(item)
         })
         return item
     }
@@ -196,10 +203,6 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
     function drain() {
         while (queue.depth > 0) {
             const item = queue.peek()
-            if (item.closed) {
-                queue.shift()
-                continue
-            }
             const slot = pool.lease()
             if (!slot) return
             queue.shift()
@@ -256,7 +259,9 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
                 return
             }
 
-            const item = { ...begin(response, requestShape(spec, config)), request: spec, startedAt }
+            const item = begin(response, requestShape(spec, config))
+            item.request = spec
+            item.startedAt = startedAt
 
             if (pool.blocker) {
                 writeFailure(item, failureResponse(pool.blocker, { message: '签名模块没加载或配置错' }))

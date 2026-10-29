@@ -8,6 +8,7 @@
 // 这个两步模式在该平台实测大面积失败。
 
 import assert from 'node:assert/strict'
+import { once } from 'node:events'
 import net from 'node:net'
 import { after, test } from 'node:test'
 
@@ -88,20 +89,52 @@ test('有空闲 worker 就派发：客户端拿到 200 与签名头，交回的�
     assert.equal(payload.headers['X-Medusa'], 'm')
 })
 
-test('没有空闲槽位就排队，槽位腾出来之后排着的请求照常拿到 200', async () => {
-    const pool = fakePool({ size: 1 })
-    const { baseUrl } = await serve(pool, { waitBudgetMs: 5000 })
+// 用真实 CR/LF 拼请求行：写进源码的转义容易被编辑工具吞掉，这里直接给字符
+const CRLF = String.fromCharCode(13, 10)
+const rawRequest = payload => {
+    const body = JSON.stringify(payload)
+    return [
+        'POST /sign HTTP/1.1',
+        'Host: 127.0.0.1',
+        `authorization: Bearer ${config.token}`,
+        'content-type: application/json',
+        `content-length: ${Buffer.byteLength(body)}`,
+        '',
+        body,
+    ].join(CRLF)
+}
 
-    // 先把唯一那台占住在飞
+test('客户端挂断之后，它占着的排队位置立刻还回来；槽位只给还活着的请求', async () => {
+    const pool = fakePool({ size: 1 })
+    const notes = []
+    const server = createDispatcher({ config: { ...config, waitBudgetMs: 5000, queueLimit: 1 }, pool, log: (e, d) => notes.push({ e, ...d }) })
+    servers.push(server)
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    const port = server.address().port
+    const baseUrl = `http://127.0.0.1:${port}`
+
+    // 唯一那台占住在飞：任何请求都只能排队
     const held = pool.lease()
     held.run({ url: 'https://api.qishui.com/held' })
     await until(() => pool.requests.length === 1, '占位请求进入 worker')
 
-    const pending = post(baseUrl, signPayload())
-    pool.complete(held.id, { kind: 'SUCCESS', body: signedBody() })
+    const socket = net.connect(port, '127.0.0.1')
+    await new Promise(resolve => socket.once('connect', resolve))
+    socket.write(rawRequest(signPayload({ url: 'https://api.qishui.com/abandoned' })))
+    await new Promise(resolve => setTimeout(resolve, 50))
 
-    // 腾出来的槽位要接住排着的那一个 —— 队列长度是内部变量，这里只看它被接住
-    await until(() => pool.requests.length === 2, '空闲槽位接住排队的请求')
+    // 队列只有 1 个位置且被上一条占了 —— 这条被当场拒就是「上一条确实排进去了」的凭据
+    const witness = await post(baseUrl, signPayload({ url: 'https://api.qishui.com/witness' }))
+    assert.equal(witness.status, 503, '队列已被占满')
+
+    socket.destroy()
+    await once(socket, 'close')
+
+    // 挂断之后位置要还回来：还回来才谈得上「排得下」，否则这条又会被当场拒
+    const pending = post(baseUrl, signPayload({ url: 'https://api.qishui.com/alive' }))
+    pool.complete(held.id, { kind: 'SUCCESS', body: signedBody() })
+    await until(() => pool.requests.length === 2, '腾出的槽位接住了一条排队的')
+    assert.match(pool.requests[1].request.url, /\/alive$/, '接住槽位的是还活着的那一条')
     pool.complete(pool.requests[1].slotId, { kind: 'SUCCESS', body: signedBody() })
 
     const response = await pending

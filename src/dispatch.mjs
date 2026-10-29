@@ -45,6 +45,19 @@ export class Queue {
         return this.#items[0]
     }
 
+    /**
+     * 按身份挪掉队列里的某一项。
+     *
+     * 客户端挂断之后它占的那个排队位置要立刻还回去：否则「队列有上限」这条会被一堆
+     * 没人等的幽灵位置撑满，活着的人反而被当场拒。
+     */
+    remove(item) {
+        const index = this.#items.indexOf(item)
+        if (index < 0) return false
+        this.#items.splice(index, 1)
+        return true
+    }
+
     [Symbol.iterator]() {
         return this.#items[Symbol.iterator]()
     }
