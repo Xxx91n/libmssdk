@@ -9,7 +9,7 @@
 | --- | --- |
 | Node.js 18+ | 唯一必装项。从你的客户端复制文件后，实测 v24 可直接加载原生模块 |
 | 签名模块 | 由你提供：从自己安装的汽水客户端复制 `bdms.node` + `metasecml.dll` 到 `vendor/soda-music/` |
-| 设备身份 | **自动生成**：首次运行随机生成 16 位 `device_id`/`iid`/`fp` 并写入 `data/identity.json`，跨重启复用 |
+| 设备身份 | **自动生成**：首次运行用独占创建生成 16 位 `device_id`/`iid`/`fp` 并写入 `data/identity.json`，跨重启复用；多个进程同时首次启动也只生成一份 |
 | 账号 Cookie | 由调用方随请求带来带去，本服务不存。注意它**不是整曲的开关**：实测有授权的曲目在完全不发 Cookie 时也给出整曲 6 档；决定整曲与否的是曲目授权（未验证的组合列在调查报告第七节） |
 
 > `vendor/soda-music/` 里的两个官方文件被 `.gitignore` 忽略，不要提交或分发。
@@ -84,7 +84,24 @@ export QISHUI_SIGNER_URL=http://127.0.0.1:18899/sign
 确需监听局域网时，务必同时设置 `LIBMSSDK_TOKEN` 并用防火墙限制来源网段。
 
 服务以 SYSTEM/服务账号运行时，若仓库目录不可写，用 `LIBMSSDK_STATE_DIR`
-指一个可写目录放 `identity.json`（否则设备号会在内存里临时生成、重启就变）。
+指一个可写目录放 `identity.json`。目录不可用时设备号只在内存里、重启就变，
+启动日志会留一条 `event=identity` 的告警，`reason` 是六种之一：
+`state-dir-unusable`（建不出目录）、`create-failed`（写不下去）、`unconfirmed`（写得下去读不回来）、
+`unreadable`（读不动）、`stuck`（坏文件挪不动）、`churning`（内容一直在变）；
+`node src/index.mjs config` 里 `identity.persisted` 为 `false` 说的是同一件事。
+
+`identity.json` 里的内容读不出合法设备号时，服务把它挪到 `identity.json.corrupt`
+（保留证据，只留最近一份）并重建一个新设备号，日志留一条 `reason=rebuild` 的告警。
+格式合法的文件不会被重建 —— 给已经存在的身份「纠错」等于再换一张脸。校验只看
+`device_id` 的格式，`iid` / `fp` 缺失或不同不会触发重建。
+
+残留窗口（慢 IO）：判「没写完」还是「真坏了」靠的是「连续两次读到同一份内容 + 等待预算」这个
+时间启发式，它假设赢家能在预算内写完。在 Wine / Docker 数据卷 / 网络卷 / 杀软扫描下，赢家可能
+在 `open` 之后被卡住超过 `LIBMSSDK_IDENTITY_READ_BUDGET_MS`，此时并发进程会把那份还是 0 字节的
+文件当成坏的挪走并重建 —— 磁盘上仍只有一份，但卡住的赢家内存里留着另一个设备号。这比改动前
+「每次都覆盖」已经窄得多（实测分裂概率从约 8% 降到 0，见 #2），但不是 0。要压更小可调大预算，
+彻底闭合（把写入也纳入独占）另开票处理。多进程冷启动的一致性仍要靠「同一次抓包 + 同一份
+identity」这套流程保证。
 
 ## 4. 用 Electron 跑（Node ABI 不匹配时）
 

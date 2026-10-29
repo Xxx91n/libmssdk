@@ -60,7 +60,8 @@ Meting-API 的远程签名服务保持兼容，
   "requestTimeoutMs": 15000 }
 ```
 
-`identity` 就是服务当前使用的设备指纹（首次运行随机生成并落盘，可用
+`identity` 就是服务当前使用的设备指纹（首次运行用独占创建生成并落盘；state 目录可用时
+多个进程同时首次启动也只会生成一份，慢 IO 下另有残留窗口见 `DEPLOY-WINDOWS.md`；内容损坏时才重建，可用
 `LIBMSSDK_DEVICE_ID` / `LIBMSSDK_IID` / `LIBMSSDK_FP` 覆盖）。调用方把它抄到自己的
 URL 参数里，即可保证「签名器 / URL」用同一份设备号。
 

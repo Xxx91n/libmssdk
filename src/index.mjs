@@ -14,6 +14,10 @@ import { buildTrackV2Request, summarizeTrackV2Response } from './probe.mjs'
 import { errorResponse, normalizeSignRequest, signResponse } from './contract.mjs'
 import { logError, logEvent } from './log.mjs'
 
+// 身份在这里就完成「读到或用独占创建生成」。真正保证不分裂的是独占创建本身（见 src/identity.mjs），
+// 不是进程角色分工：现在每个入口命令（含被按次拉起的 bridge）启动都会走到这里，靠 wx 收敛。
+// TODO(#5)：worker 池落地后，worker 侧改走 identity.mjs 的只读入口 readStoredIdentity()，
+// 不保留任何创建路径。
 const config = loadConfig()
 const signer = new BdmsSigner({ modulePath: config.bdmsModule, deviceId: config.deviceId })
 
@@ -36,6 +40,8 @@ async function commandServe() {
         version: VERSION,
         bdmsAvailable: signer.available,
         auth: Boolean(config.token),
+        // persisted=false 意味着设备号只在内存里、重启就变：启动日志要当场说出去
+        identityPersisted: config.identityPersisted,
     })
     const shutdown = () => server.close(() => process.exit(0))
     process.on('SIGINT', shutdown)

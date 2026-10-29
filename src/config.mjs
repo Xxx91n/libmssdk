@@ -1,10 +1,10 @@
 // 运行时配置：用户提供的原生模块 + 自动生成的设备身份；环境变量用于配置或覆盖。
 
-import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { identityFile, prepareStoredIdentity } from './identity.mjs'
 
 export const VERSION = '0.1.0'
 
@@ -12,7 +12,6 @@ export const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.
 
 /** 本地原生模块目录：用户可把官方客户端的两个文件复制到这里。 */
 const LOCAL_NATIVE_DIR = path.join(PROJECT_ROOT, 'vendor', 'soda-music')
-const DEFAULT_STATE_DIR = path.join(PROJECT_ROOT, 'data')
 
 const env = key => (process.env[key] || '').trim()
 
@@ -65,54 +64,19 @@ function resolveBdmsModule() {
     return candidates.find(candidate => fs.existsSync(candidate)) || ''
 }
 
-/** 设备号格式与官方客户端一致：16 位数字，首位 1-8。 */
-export function randomDeviceId() {
-    const first = 1 + (crypto.randomBytes(1)[0] % 8)
-    const rest = crypto.randomBytes(8).readBigUInt64BE() % 1000000000000000n
-    return `${first}${rest.toString().padStart(15, '0')}`
-}
-
-/** 身份文件目录：默认 <仓库>/data，可用 LIBMSSDK_STATE_DIR 改到别处。 */
-export function stateDir() {
-    return env('LIBMSSDK_STATE_DIR') || DEFAULT_STATE_DIR
-}
-
-export function identityFile(dir = stateDir()) {
-    return path.join(dir, 'identity.json')
-}
-
-function readIdentity(file) {
-    try {
-        const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
-        if (/^[1-8]\d{15}$/.test(String(parsed.device_id || ''))) return parsed
-    } catch {
-        /* 不存在或损坏都当作首次运行 */
-    }
-    return null
-}
-
-function writeIdentity(file, identity) {
-    try {
-        fs.mkdirSync(path.dirname(file), { recursive: true })
-        fs.writeFileSync(file, `${JSON.stringify(identity, null, 2)}\n`, { mode: 0o600 })
-        return true
-    } catch {
-        return false
-    }
-}
-
 /**
  * 设备身份（device_id / iid / fp）。
  *
- * 优先级：环境变量覆盖 > state 目录里的 identity.json > 首次运行随机生成并落盘。
+ * 优先级：环境变量覆盖 > state 目录里的 identity.json > 独占创建生成并落盘。
  * 落盘是为了让设备号跨重启保持稳定 —— 每次重启换设备号会让服务端看到的设备画像跳变。
+ * 「读到就用 / 读不到就生成」的原子性由 src/identity.mjs 的独占创建保证，这里不再自己判断。
  */
 export function resolveIdentity() {
     const overrideDevice = env('LIBMSSDK_DEVICE_ID') || env('QISHUI_DEVICE_ID')
     const overrideIid = env('LIBMSSDK_IID')
     const overrideFp = env('LIBMSSDK_FP')
-
     const file = identityFile()
+
     if (overrideDevice) {
         // 显式覆盖时不碰 state 文件，便于临时用别的设备号做对照实验
         return {
@@ -121,33 +85,25 @@ export function resolveIdentity() {
             fp: overrideFp || overrideDevice,
             source: 'env',
             stateFile: file,
+            created: false,
             persisted: true,
         }
     }
 
-    let stored = readIdentity(file)
-    let persisted = true
-    if (!stored) {
-        const generated = {
-            device_id: randomDeviceId(),
-            iid: randomDeviceId(),
-            created_at: new Date().toISOString(),
-        }
-        generated.fp = generated.device_id
-        persisted = writeIdentity(file, generated)
-        stored = generated
-    }
+    const stored = prepareStoredIdentity()
 
     return {
-        deviceId: stored.device_id,
-        iid: overrideIid || stored.iid || '',
-        fp: overrideFp || stored.fp || stored.device_id,
+        deviceId: stored.identity.device_id,
+        iid: overrideIid || stored.identity.iid || '',
+        fp: overrideFp || stored.identity.fp || stored.identity.device_id,
         source: overrideIid || overrideFp ? 'state+env' : 'state',
         stateFile: file,
-        persisted,
+        created: stored.created,
+        persisted: stored.persisted,
     }
 }
 
+/** 主进程入口专用：这一步会准备身份文件（可能独占创建它）。worker 侧不要调这里，直接用 identity.mjs 的只读入口。 */
 export function loadConfig() {
     const clientDir = resolveClientDir()
     const bdmsModule = resolveBdmsModule()
