@@ -56,17 +56,16 @@ function send(message) {
 /**
  * 报错文本要能进日志也能回给调用方，所以先过一遍本机路径脱敏。
  */
-function describeError(error, modulePath) {
-    const text = String(error?.message || error || '未知错误')
-    return redactMachinePaths(text, [modulePath, path.dirname(modulePath)]).slice(0, 200)
+/** 报错文本要能进日志也能回给调用方，所以先过一遍本机路径脱敏，再截断。 */
+function mask(text, modulePath) {
+    return redactMachinePaths(String(text || '未知错误'), [modulePath, path.dirname(modulePath)]).slice(0, 200)
 }
 
-/**
- * 自学习预热：循环调用探针，直到连续几次输出的长度彼此相同。
- *
- * 判据里没有、也不该有任何绝对长度数字 —— 换一个客户端版本的原生模块，稳态长度就可能变，
- * 写死的那台机器会永远停在「没就绪」。这里也不 sleep：签一次本身就要一百多毫秒，循环本身就是节奏。
- */
+function describeError(error, modulePath) {
+    return mask(String(error?.message || error), modulePath)
+}
+
+/** 算一次签名并把响应字节交回去。就绪判据与采样循环在 src/warmup.mjs。 */
 function handleTask(signer, message) {
     const request = message.request || {}
     const startedAt = Date.now()
@@ -123,7 +122,8 @@ function main() {
         })
         if (warmup.ready) send({ type: 'ready' })
         // 预算内没收敛：保持未就绪、进程不退。原因写清楚，别让主进程只剩一个数字
-        else send({ type: 'warmup-failed', kind: ERROR_KINDS.INTERNAL_ERROR, reason: warmup.reason })
+        // 原因里可能带模块绝对路径（require 失败原文就是那样），过一遍脱敏再发给主进程
+        else send({ type: 'warmup-failed', kind: ERROR_KINDS.INTERNAL_ERROR, reason: mask(warmup.reason, modulePath) })
     }
 
     process.on('message', message => {
