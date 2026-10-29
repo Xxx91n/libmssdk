@@ -20,12 +20,15 @@ src/config.mjs       环境变量、客户端目录、bdms 路径、身份配置
 src/identity.mjs     身份文件：独占创建（唯一写入口）与只读加载
 src/bdms.mjs         bdms.node 加载 / init / 签名；headers 展开和解析纯函数
 src/contract.mjs     SignRequest 校验和 SignResponse 组装
+src/errors.mjs       失败分类：状态码 / 原因码映射表与等待时长（纯函数，尚未接线）
 src/probe.mjs        track_v2 真机自检和整曲 / 试听判定
 src/server.mjs       HTTP 路由
 src/index.mjs        CLI：serve / bridge / selftest / probe / config
 test/                使用 mock-bdms 的离线测试（含多进程争抢身份文件的用例）
+tools/               手动脚本（打真机，不进 npm test，不随包发布）
 docs/CONTRACT.md     服务契约
 docs/DEPLOY-WINDOWS.md Windows 部署
+docs/INVESTIGATION-DEVICE-ENTITLEMENT.md 设备身份与整曲权益的对照实验与结论
 deploy/README.md     Docker 部署
 ```
 
@@ -34,7 +37,9 @@ deploy/README.md     Docker 部署
 1. **官方二进制不入库**：`bdms.node`、`metasecml.dll` 不提交、不发布、不再分发。
 2. **签名覆盖 URL + 全部请求头**：`/sign` 收到的 headers 必须是调用方真实发送的一份。
 3. **`x-ss-stub` 是 body 的 MD5 大写**，既是签名输入，也要随请求发送。
-4. **设备成套**：`device_id` / `iid` / `fp` 必须与 `bdms.init({ deviceId })` 一致。
+4. **设备号自洽**：`device_id` / `iid` / `fp` 与 `bdms.init({ deviceId })` 用同一份——
+   这是本服务的内部约定（省掉每请求重新 `init`），**不是上游的强制要求**：实测上游不要求
+   签名设备与账号登录设备一致，见 `docs/INVESTIGATION-DEVICE-ENTITLEMENT.md`。
 5. **身份只有一个写入口**：写 `identity.json` 只能走 `src/identity.mjs` 的
    `prepareStoredIdentity()`（`open` 带 `wx` 独占创建，输的一方回读赢家的值），
    worker 侧用只读的 `readStoredIdentity()`。

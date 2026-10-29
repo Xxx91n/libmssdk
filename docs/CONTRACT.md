@@ -63,7 +63,7 @@ Meting-API 的远程签名服务保持兼容，
 `identity` 就是服务当前使用的设备指纹（首次运行用独占创建生成并落盘；state 目录可用时
 多个进程同时首次启动也只会生成一份，慢 IO 下另有残留窗口见 `DEPLOY-WINDOWS.md`；内容损坏时才重建，可用
 `LIBMSSDK_DEVICE_ID` / `LIBMSSDK_IID` / `LIBMSSDK_FP` 覆盖）。调用方把它抄到自己的
-URL 参数里即可保证「签名器 / URL / 会话」同设备。
+URL 参数里，即可保证「签名器 / URL」用同一份设备号。
 
 ### 三条硬性约定
 
@@ -73,8 +73,11 @@ URL 参数里即可保证「签名器 / URL / 会话」同设备。
    因此 `headers` 必须是**真实要发出去的那一份**：少一个（尤其 `cookie`、
    `x-ss-stub`）都会被服务端判成空响应。
 2. **`x-ss-stub` = body 的 MD5（大写）**，是签名输入的一部分，也要随请求发出去。
-3. **设备必须成套**：`device_id`（以及 URL 里的 `iid` / `fp`）要和
-   `bdms.init({ deviceId })` 用的是同一个设备；换设备要重新抓指纹。
+3. **设备号要自洽**：URL 里的 `device_id`（以及 `iid` / `fp`）要和
+   `bdms.init({ deviceId })` 用的是同一份——这样签名器不必每个请求重新 `init()`。
+   这是**本服务内部的约定，不是上游的强制要求**：对照实验里两种设备号形状、
+   乃至不带 Cookie，同一首曲目的整曲读数完全一致（详见
+   [`INVESTIGATION-DEVICE-ENTITLEMENT.md`](INVESTIGATION-DEVICE-ENTITLEMENT.md)）。
 
 ## 兼容形态
 
@@ -91,7 +94,8 @@ URL 参数里即可保证「签名器 / URL / 会话」同设备。
 ```jsonc
 {
   "track_id": "7501674235158431760",
-  "cookie": "sessionid_ss=…",     // 可选；不传就是匿名（VIP 曲目只会得到试听）
+  "cookie": "sessionid_ss=…",     // 可选；实测在会给出整曲的曲目上，不发 Cookie 也照样整曲
+                                   // （签名才是取流凭据；没测过的组合见调查报告第七节）
   "device_id": "<device_id>", // 可选，默认取服务自身的设备身份（见 /config）
   "iid": "<install_id>",
   "fp": "<device_id>"

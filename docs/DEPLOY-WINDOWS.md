@@ -10,7 +10,7 @@
 | Node.js 18+ | 唯一必装项。从你的客户端复制文件后，实测 v24 可直接加载原生模块 |
 | 签名模块 | 由你提供：从自己安装的汽水客户端复制 `bdms.node` + `metasecml.dll` 到 `vendor/soda-music/` |
 | 设备身份 | **自动生成**：首次运行用独占创建生成 16 位 `device_id`/`iid`/`fp` 并写入 `data/identity.json`，跨重启复用；多个进程同时首次启动也只生成一份 |
-| 账号 Cookie | 可选但 VIP 曲目必需；用 libresoda 的扫码登录或从客户端抓 |
+| 账号 Cookie | 由调用方随请求带来带去，本服务不存。注意它**不是整曲的开关**：实测有授权的曲目在完全不发 Cookie 时也给出整曲 6 档；决定整曲与否的是曲目授权（未验证的组合列在调查报告第七节） |
 
 > `vendor/soda-music/` 里的两个官方文件被 `.gitignore` 忽略，不要提交或分发。
 > 也可以不复制文件，直接设 `LIBMSSDK_CLIENT_DIR` 指向客户端版本目录。
@@ -56,7 +56,7 @@ node src/index.mjs probe --track 7501674235158431760 --cookie "sessionid_ss=…;
 | 输出线索 | 含义 |
 | --- | --- |
 | `accepted: false` + `空响应` | 签名没被接受：`device_id` 与签名器不一致，或 `headers` 与实际发送的不一致 |
-| `streamDurationSeconds ≈ 30` | 只拿到试听：账号没有该曲目整曲权益（或 Cookie 失效） |
+| `streamDurationSeconds ≈ 30` | 只拿到试听：先换一首已知能整曲的曲子复测——实测同一份设备号在别的曲目能拿到整曲，所以别先怀疑设备号。Cookie 有无、真实登录设备这两条在试听级曲目上还没测（见 [`INVESTIGATION-DEVICE-ENTITLEMENT.md`](INVESTIGATION-DEVICE-ENTITLEMENT.md) 第七节） |
 | 502 + `未找到 bdms.node` | `LIBMSSDK_CLIENT_DIR` 指到了错误目录（应指向含 `resources` 的版本目录） |
 
 ## 3. 常驻服务
@@ -134,8 +134,11 @@ SODA_DEVICE_ID=<device_id> SODA_IID=<iid> SODA_FP=<fp> \
 
 ## 6. 运维要点
 
-- **设备指纹会失效**：换客户端版本/重装/换机后要重新抓 `device_id`
-  （`/healthz` 的 `deviceId` 只做脱敏展示，便于核对是否换过）。
-- **Cookie 会过期**：`/probe` 会明确告诉你"只拿到试听"。
+- **设备指纹不必"抓"**：默认由服务自己生成一份 16 位设备号并落盘复用；对照实验显示上游不要求
+  它与账号登录设备一致。「静态抓包凭证回放」那条路是否要求设备号与那次抓包同源，本票没有重测。
+- **Cookie 过期不会被 `/probe` 抓到**：本次在**一首**有授权的曲目上，不发 Cookie 也拿到整曲
+  （样本只有这一首，别把它当通用结论，未测组合见调查报告第七节），所以「整曲」不代表 Cookie
+  仍然有效。Cookie 是不是活的，要用你自己的播放器能不能登录态功能来判断，
+  不要拿 `/probe` 当登录态探针。
 - **日志**：stdout 是 JSON 行，只含请求形状与签名长度；可直接接文件/日志系统。
 - **安全**：服务等于你账号的取流能力，不要公网暴露、不要分享 token。
