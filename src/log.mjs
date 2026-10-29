@@ -10,6 +10,20 @@ export function redactHeaders(headers = {}) {
     return result
 }
 
+/**
+ * 抹掉文本里的本机路径。
+ *
+ * 报错原文最容易夹带路径：require() 失败会写上模块的绝对路径，有时还有依赖目录、cwd、home。
+ * 日志只允许请求形状、签名长度和脱敏设备号，而这条路径属于部署者的机器。
+ */
+export function redactMachinePaths(text, locations = []) {
+    let redacted = String(text ?? '')
+    for (const location of locations.filter(Boolean)) {
+        redacted = redacted.split(location).join('(本机路径)')
+    }
+    return redacted
+}
+
 export function logEvent(event, detail = {}) {
     const line = { at: new Date().toISOString(), event, ...detail }
     process.stdout.write(`${JSON.stringify(line)}\n`)

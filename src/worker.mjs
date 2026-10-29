@@ -7,13 +7,15 @@
 // 身份：worker 只读身份文件（readStoredIdentity），这条路径上没有创建。多进程首次启动不该分裂
 // 出两个设备号，那是主进程 fork 之前用独占创建收敛好的事（见 src/identity.mjs）。
 
+import os from 'node:os'
+import path from 'node:path'
 import { BdmsSigner } from './bdms.mjs'
-import { resolveBdmsModule } from './config.mjs'
+import { PROJECT_ROOT, resolveBdmsModule } from './config.mjs'
 import { parsePositiveInt } from './dispatch.mjs'
 import { signResponse } from './contract.mjs'
 import { ERROR_KINDS } from './errors.mjs'
 import { readStoredIdentity } from './identity.mjs'
-import { logWarn } from './log.mjs'
+import { logWarn, redactMachinePaths } from './log.mjs'
 import { WARMUP_START, nextWarmup } from './warmup.mjs'
 
 const env = key => (process.env[key] || '').trim()
@@ -53,15 +55,19 @@ function send(message) {
 }
 
 /**
- * 报错文本要能进日志也能回给调用方，所以不能夹带本机路径。
- *
- * bdms.node 的加载失败原文里就写着 modulePath（`bdms.node 不存在：<绝对路径>`），
- * 而这条路径属于部署者的机器 —— 约定是日志里只允许请求形状、签名长度和脱敏设备号。
+ * 部署者机器上的路径候选：报错原文里可能出现的不止 modulePath 一个 —— require 失败还会带上
+ * 依赖所在的目录，容器里还常有 cwd 与 home 的短形。
+ */
+function machinePaths(modulePath) {
+    return [modulePath, path.dirname(modulePath), PROJECT_ROOT, process.cwd(), os.homedir()].filter(Boolean)
+}
+
+/**
+ * 报错文本要能进日志也能回给调用方，所以先过一遍本机路径脱敏。
  */
 function describeError(error, modulePath) {
     const text = String(error?.message || error || '未知错误')
-    const masked = modulePath ? text.split(modulePath).join('bdms.node') : text
-    return masked.slice(0, 200)
+    return redactMachinePaths(text, machinePaths(modulePath)).slice(0, 200)
 }
 
 /**
@@ -139,7 +145,8 @@ function main() {
         const budgetMs = parsePositiveInt(env('LIBMSSDK_WARMUP_BUDGET_MS'), 30_000)
         const warmup = warmUp(signer, warmupProbe(identity.deviceId), budgetMs)
         if (warmup.ready) send({ type: 'ready' })
-        else send({ type: 'warmup-failed', kind: ERROR_KINDS.INTERNAL_ERROR, budgetMs })
+        // 预算内没收敛：保持未就绪、进程不退。原因写清楚，别让主进程只剩一个数字
+        else send({ type: 'warmup-failed', kind: ERROR_KINDS.INTERNAL_ERROR, reason: `预热 ${budgetMs}ms 内输出长度没收敛` })
     }
 
     process.on('message', message => {
