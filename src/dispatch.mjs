@@ -45,10 +45,6 @@ export class Queue {
         return this.#items[0]
     }
 
-    clear() {
-        this.#items = []
-    }
-
     [Symbol.iterator]() {
         return this.#items[Symbol.iterator]()
     }

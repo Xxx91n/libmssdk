@@ -1,5 +1,5 @@
 // 假池子：给分发器的 HTTP 用例用，只实现分发器真正调的那几件事
-// （size / readyCount / blocker / lease / on('available')）。
+// （size / readyCount / busyCount / blocker / lease / on('available')）。
 //
 // 分发器不该知道进程，所以这里连「worker」都没有，只有槽位和「什么时候报告完成」。
 import { EventEmitter } from 'node:events'
@@ -50,8 +50,6 @@ export function fakePool({ size = 1, ready = true, blocker = null } = {}) {
         busyCount() {
             return slots.filter(slot => slot.busy).length
         },
-        start: async () => {},
-        stop: async () => {},
     }
     return pool
 }

@@ -24,7 +24,7 @@ export function redactHeaders(headers = {}) {
  * 短于 3 个字符的一律不收：`path.dirname('')` 是 '.'，收进来会把「bdms.node」吃成
  * 「bdms(本机路径)node」—— 脱敏脱错了比不脱更糟。
  */
-export function sensitivePaths(extra = []) {
+function sensitivePaths(extra = []) {
     return [...extra, process.cwd(), os.homedir(), PROJECT_ROOT].filter(
         location => typeof location === 'string' && location.length >= 3,
     )

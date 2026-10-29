@@ -25,11 +25,12 @@ test('队列先进先出，满了直接拒而不是无限堆积', () => {
 
     assert.equal(queue.shift(), 'a', '先来先服务')
     assert.equal(queue.push('c'), true, '腾出一个位置就能再进一个')
-    assert.deepEqual([...queue], ['b', 'c'])
+    assert.deepEqual([...queue], ['b', 'c'], '快照顺序就是出队顺序')
 
-    queue.clear()
+    assert.equal(queue.shift(), 'b')
+    assert.equal(queue.shift(), 'c')
     assert.equal(queue.depth, 0)
-    assert.equal(queue.shift(), undefined)
+    assert.equal(queue.shift(), undefined, '排空之后再取还是空')
 })
 
 test('worker 数按绑定地址推导：只服务本机就不多开，对局域网开放才按核数扩', () => {
