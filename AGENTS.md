@@ -20,6 +20,7 @@ src/config.mjs       环境变量、客户端目录、bdms 路径、身份配置
 src/identity.mjs     身份文件：独占创建（唯一写入口）与只读加载
 src/bdms.mjs         bdms.node 加载 / init / 签名；headers 展开和解析纯函数
 src/contract.mjs     SignRequest 校验和 SignResponse 组装
+src/log.mjs          日志与脱敏：凭据只留长度，本机路径一律换掉
 src/auth.mjs         Bearer Token 比对（计时安全；老路径与分发器共用）
 src/errors.mjs       失败分类：状态码 / 原因码映射表与等待时长（纯函数，默认路径尚未接线）
 src/dispatch.mjs     分发的纯判据：等待预算 / 队列上限 / worker 数推导 / 重生退避（时间从参数进来）

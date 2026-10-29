@@ -10,6 +10,8 @@
 
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
+import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { after, test } from 'node:test'
@@ -18,6 +20,7 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const mockBdms = path.join(here, 'fixtures', 'mock-bdms.mjs')
 
 const { forkWorker, startDispatcher } = await import('../src/dispatcher.mjs')
+const { prepareStoredIdentity } = await import('../src/identity.mjs')
 
 const config = {
     version: 'test',
@@ -38,7 +41,7 @@ after(async () => {
 })
 
 /** 起一套真的：按 startDispatcher 的生产装配，只把 fork 包一层好拿到进程句柄。 */
-async function startReal({ workers, unstableCalls = 0, signDelayMs = 0 }) {
+async function startReal({ workers, unstableCalls = 0, signDelayMs = 0, stateDir }) {
     const children = []
     const notes = []
     const giveUps = []
@@ -46,13 +49,17 @@ async function startReal({ workers, unstableCalls = 0, signDelayMs = 0 }) {
         ...process.env,
         LIBMSSDK_WORKERS: String(workers),
         LIBMSSDK_BDMS_MODULE: mockBdms,
-        LIBMSSDK_DEVICE_ID: config.deviceId,
+        // 给了 stateDir 就不钉设备号：那才是真部署的样子 —— 主进程 fork 之前把身份准备好，
+        // worker 那边只有只读入口
+        LIBMSSDK_DEVICE_ID: stateDir ? '' : config.deviceId,
         LIBMSSDK_WORKER_RESPAWN_BASE_MS: '100',
         LIBMSSDK_WORKER_RESPAWN_CAP_MS: '400',
         LIBMSSDK_WARMUP_BUDGET_MS: '20000',
         MOCK_BDMS_UNSTABLE_CALLS: String(unstableCalls),
         MOCK_BDMS_SIGN_DELAY_MS: String(signDelayMs),
     }
+    if (stateDir) env.LIBMSSDK_STATE_DIR = stateDir
+    if (stateDir) delete env.LIBMSSDK_DEVICE_ID
     const entry = startDispatcher({
         config,
         env,
@@ -103,11 +110,33 @@ async function post(baseUrl, payload) {
     return { status: response.status, text: await response.text() }
 }
 
-test('真进程：预热判据自己学出稳态；杀掉正在算签名的那台，客户端读到 500 而不是永远等', async () => {
+test('真进程：身份只读、预热自学习、杀在飞的那台之后槽位收得回', async () => {
+    // 主进程 fork 之前先把身份准备好；worker 那条路径上只有 readStoredIdentity
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'libmssdk-worker-'))
+    const prepared = prepareStoredIdentity({ dir })
+    const before = fs.readFileSync(path.join(dir, 'identity.json'), 'utf8')
     // 前两次输出比稳态短（真机 init 之后就有这么一段窗口），单次调用同步占住 300ms
-    const { pool, children, notes, baseUrl } = await startReal({ workers: 1, unstableCalls: 2, signDelayMs: 300 })
+    const { pool, children, notes, baseUrl } = await startReal({
+        workers: 1,
+        unstableCalls: 2,
+        signDelayMs: 300,
+        stateDir: dir,
+    })
 
     await until(() => pool.readyCount === 1, 'worker 自学习到就绪')
+    const anonymous = await post(baseUrl, {
+        url: 'https://api.qishui.com/luna/pc/track_v2?aid=386088',
+        method: 'POST',
+        headers: { 'x-ss-stub': 'ABC' },
+    })
+    assert.equal(
+        JSON.parse(anonymous.text).device_id,
+        prepared.identity.device_id,
+        '没在 URL 里点名的请求，用的是主进程落在文件里的那份身份',
+    )
+    assert.equal(fs.readFileSync(path.join(dir, 'identity.json'), 'utf8'), before, 'worker 不许改写身份文件')
+    assert.deepEqual(fs.readdirSync(dir), ['identity.json'], '目录里没多出东西：worker 手上没有创建路径')
+
     const started = notes.find(note => note.event === 'dispatcher')
     assert.equal(started.detail.workers, 1, '启动日志要写明实际值')
     assert.match(started.detail.reason, /LIBMSSDK_WORKERS=1/, '还要写明这个数是谁给的')
@@ -128,6 +157,7 @@ test('真进程：预热判据自己学出稳态；杀掉正在算签名的那�
     const payload = JSON.parse(recovery.text)
     assert.equal(payload.headers['X-Helios'].startsWith('mock-helios-'), true)
     assert.equal(payload.headers['X-Medusa'].startsWith('mock-medusa-'), true)
+    fs.rmSync(dir, { recursive: true, force: true })
 })
 
 test('真进程多开：杀掉一台，其余继续服务，不需要有人介入', async () => {
