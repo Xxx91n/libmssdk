@@ -48,11 +48,19 @@ export function createWorkerPool({
         slot.blocker = null
         slot.dead = false
         slot.counted = false
-        transport.on('message', message => handleMessage(slot, message))
+        // 一台进程的死法会成对发来 exit / disconnect / error，而迟到的那一半可能在替补已经
+        // 就绪之后才到。每个处理器都先对身份：不是当前这台传输的事件就当作没看见 ——
+        // 否则旧进程迟到的 disconnect 会把正在服务流量的替补判死，还多记一次「反复退出」，
+        // 攒够了就把整个服务掀掉。
+        const mine = () => slot.transport === transport
+        transport.on('message', message => {
+            if (mine()) handleMessage(slot, message)
+        })
         // child_process 的 'error'（spawn 失败、IPC 通道坏掉）没人接就是主进程的未捕获异常 ——
         // 这个 process 正是服务本身。而且它可能不带随后的 exit（比如 node 可执行文件本身
         // 找不到），所以也要计入「反复退出」，否则退避会永远卡在封顶反复试。
         transport.on('error', error => {
+            if (!mine()) return
             log('worker-error', { id: slot.id, message: redactMachinePaths(String(error?.message || error)) })
             countExit(slot, null)
             gone(slot)
@@ -61,10 +69,13 @@ export function createWorkerPool({
         // 槽位会冒出两台进程；但「退出码」只有 exit 才知道，所以计数单独走 countExit ——
         // 拿 disconnect 的 null 当「非零退出」会把「5 次非零」悄悄变成「5 次任何退出」。
         transport.on('exit', code => {
+            if (!mine()) return
             countExit(slot, code)
             gone(slot)
         })
-        transport.on('disconnect', () => gone(slot))
+        transport.on('disconnect', () => {
+            if (mine()) gone(slot)
+        })
         return transport
     }
 

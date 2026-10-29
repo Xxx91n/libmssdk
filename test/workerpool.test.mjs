@@ -336,3 +336,27 @@ test('管道断了但进程还在：补一台之前先把这台关掉，别留�
     assert.equal(workers.length, 2, '补上来的是新进程，不是那台孤儿')
     await pool.stop()
 })
+
+test('旧进程迟到的事件不能杀掉替补：一台进程的事件只认它自己那台传输', async () => {
+    const { pool, workers, spawnOrder, notes } = healthy(1, { autoReady: true, respawnBaseMs: 1 })
+    await pool.start()
+
+    const old = workers[0]
+    old.exit(1)
+    await waitFor(() => spawnOrder.length === 2 && pool.readyCount === 1, '替补起来并就绪')
+    const replacement = workers.at(-1)
+
+    // 真进程死一次会成对发来 exit / disconnect / error；迟到的一半落在替补已经就绪之后
+    old.emit('disconnect')
+    old.fail(new Error('IPC 通道已关闭'))
+    await tick()
+
+    assert.equal(pool.readyCount, 1, '替补不能被旧进程迟到的事件判死')
+    assert.deepEqual(replacement.killed, [], '替补没被关掉 —— 关掉它等于把一条正常服务的路径掀了')
+    assert.equal(
+        notes.filter(note => note.event === 'worker-exit').length,
+        1,
+        '迟到的事件不该再记一次退出：攒够了会把好端端的进程判成「机器坏了」',
+    )
+    await pool.stop()
+})
