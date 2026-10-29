@@ -31,6 +31,15 @@ test('队列先进先出，满了直接拒而不是无限堆积', () => {
     assert.equal(queue.shift(), 'c')
     assert.equal(queue.depth, 0)
     assert.equal(queue.shift(), undefined, '排空之后再取还是空')
+
+    // 客户端挂断时按身份把它那一项挪走，位置要立刻还给下一个等待者
+    const occupied = new Queue(1)
+    assert.equal(occupied.push({ id: 'gone' }), true)
+    assert.equal(occupied.push({ id: 'next' }), false, '位置被占着')
+    assert.equal(occupied.remove(occupied.peek()), true)
+    assert.equal(occupied.depth, 0)
+    assert.equal(occupied.push({ id: 'next' }), true, '腾出来的位置马上能用')
+    assert.equal(occupied.remove({ id: '早就不在队列里' }), false, '不在队列里就是没挪动')
 })
 
 test('worker 数按绑定地址推导：只服务本机就不多开，对局域网开放才按核数扩', () => {
