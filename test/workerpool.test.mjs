@@ -152,9 +152,9 @@ test('60 秒里退出 5 次就整体退出，交给外层重启策略', async ()
     }
     assert.equal(giveUps, 1, '只叫一次：主进程整体退出，不再自己无限重试')
 
-    const settled = spawnOrder.length
-    await delay(20)
-    assert.equal(spawnOrder.length, settled, '放弃之后一台都不再拉')
+    // 放弃时已经排好的重生计时器全部作废，所以这里不需要等一看就能断定「不再拉新的」：
+    // 初始 1 台 + 前 4 次退出各重生 1 台，第 5 次只触发放弃
+    assert.equal(spawnOrder.length, 5, '放弃之后一台都不再拉')
     await pool.stop()
 })
 
@@ -186,8 +186,8 @@ test('单个 worker 预热失败：它保持未就绪，但进程不退出', asy
     workers[0].report({ type: 'warmup-failed', budgetMs: 30_000 })
     await tick()
     assert.equal(pool.readyCount, 0, '预热没过去就是没就绪，不能假装能服务')
-    assert.equal(workers.length, 2, '进程不退出也不换：一次预热失败不该把这台机器判死，也不该提前拉出替补')
-    assert.equal(workers.length, 2, '等前一台把话说完，才拉下一台')
+    // 还是这两台：预热失败既没把进程判死，也没提前拉出替补（下一台是等它把话说完才拉的）
+    assert.equal(workers.length, 2)
 
     workers[1].reportReady()
     await starting
@@ -298,5 +298,28 @@ test('干净的 exit(0) 不算进「反复退出」：判据数的是非零退�
     assert.equal(giveUps, 0, '五次都是干净退出：这台机器没坏，只是进程自己走了')
     workers.at(-1).reportReady()
     assert.ok(pool.lease(), '重生出来的那台照常就绪待命')
+    await pool.stop()
+})
+
+test('只来 error 不来 exit 的死亡也计入反复退出：不然退避会永远卡在封顶重试', async () => {
+    let giveUps = 0
+    const { pool, workers, spawnOrder } = healthy(1, {
+        autoReady: false,
+        respawnBaseMs: 1,
+        respawnCapMs: 1,
+        onGiveUp: () => {
+            giveUps += 1
+        },
+    })
+    const starting = pool.start()
+    workers[0].reportReady()
+    await starting
+
+    for (let index = 0; index < 5; index += 1) {
+        workers.at(-1).fail(new Error('spawn node ENOENT'))
+        await waitFor(() => spawnOrder.length === index + 2 || giveUps > 0, `第 ${index + 1} 次重生`)
+    }
+    assert.equal(giveUps, 1, '计数不能只挂在 exit 上：spawn 失败的进程根本走不到 exit')
+    assert.equal(spawnOrder.length, 5, '放弃之后不再拉新的')
     await pool.stop()
 })

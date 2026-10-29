@@ -1,4 +1,5 @@
-// 假的 worker 传输：只提供真 child_process 那一层用到的四个动作（send / message / exit / kill）。
+// 假的 worker 传输：只提供真 child_process 那一层被池子用到的那几个动作
+// （send / 'message' / 'exit' / 'disconnect' / 'error'）。
 //
 // 池子的整个价值就在「忙闲回收」上，而它必须能被确定性地形变：真进程什么时候「报告完成」
 // 由测试说了算，不需要 sleep 也不需要真原生模块。
@@ -39,15 +40,20 @@ export class FakeWorker extends EventEmitter {
     }
 
     /** 按池子派下来的任务原样回一份成功签名（body 里带回 url 方便断言真的是它算的那一次）。 */
-    reportResult({ kind = 'SUCCESS', extra = {} } = {}) {
+    reportResult() {
         const task = this.task()
-        this.report({ type: 'result', id: task.id, kind, body: { ok: true, url: task.request.url }, ...extra })
+        this.report({ type: 'result', id: task.id, kind: 'SUCCESS', body: { ok: true, url: task.request.url } })
     }
 
     /** 按池子派下来的任务回一份失败：原因文本要能原样交回分发器。 */
     reportFailure(kind, message) {
         const task = this.task()
         this.report({ type: 'result', id: task.id, kind, message })
+    }
+
+    /** 只有 'error'、没有随后的 'exit'：真 child_process 在 spawn 失败时就是这样。 */
+    fail(error) {
+        this.emit('error', error)
     }
 
     exit(code = 1) {

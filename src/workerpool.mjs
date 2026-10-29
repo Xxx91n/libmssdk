@@ -47,12 +47,15 @@ export function createWorkerPool({
         slot.busy = false
         slot.blocker = null
         slot.dead = false
+        slot.counted = false
         slot.code = null
         transport.on('message', message => handleMessage(slot, message))
         // child_process 的 'error'（spawn 失败、IPC 通道坏掉）没人接就是主进程的未捕获异常 ——
-        // 这个 process 正是服务本身。接住它，并按「这台没了」走同一条回收路。
+        // 这个 process 正是服务本身。而且它可能不带随后的 exit（比如 node 可执行文件本身
+        // 找不到），所以也要计入「反复退出」，否则退避会永远卡在封顶反复试。
         transport.on('error', error => {
             log('worker-error', { id: slot.id, message: redactMachinePaths(String(error?.message || error)) })
+            countExit(slot, null)
             gone(slot)
         })
         // 真进程死一次会来两个事件（disconnect 先、exit 随后）。回收与重生只认第一个，否则一个
@@ -60,8 +63,8 @@ export function createWorkerPool({
         // 拿 disconnect 的 null 当「非零退出」会把「5 次非零」悄悄变成「5 次任何退出」。
         transport.on('exit', code => {
             slot.code = code
+            countExit(slot, code)
             gone(slot)
-            countExit(code)
         })
         transport.on('disconnect', () => gone(slot))
         return transport
@@ -75,14 +78,17 @@ export function createWorkerPool({
         scheduleRespawn(slot)
     }
 
-    function countExit(code) {
-        if (stopping || code === 0) return
+    /** 一次进程死亡只计一次：exit 与 error 可能都到，也可能只到一个。 */
+    function countExit(slot, code) {
+        if (stopping || givenUp || slot.counted) return
+        slot.counted = true
+        if (code === 0) return
+        log('worker-exit', { id: slot.id, code })
         const now = Date.now()
         // 只留窗口内那几次：这是一台要跑很多天的常驻进程，不能一直攒退出记录
         exits.push(now)
         while (exits.length > 0 && now - exits[0] > GIVE_UP_WINDOW_MS) exits.shift()
         if (!shouldGiveUp(exits, now, { windowMs: GIVE_UP_WINDOW_MS })) return
-        if (givenUp) return
         givenUp = true
         // 已经排好的重生全部作废：继续重试只是把「机器坏了」拖成「谁都不知道坏了」
         for (const timer of timers) clearTimeout(timer)
@@ -95,7 +101,7 @@ export function createWorkerPool({
         if (stopping || givenUp) return
         slot.failures += 1
         const delayMs = backoffDelayMs(slot.failures, { baseMs: respawnBaseMs, capMs: respawnCapMs })
-        log('worker-respawn', { id: slot.id, delayMs, failures: slot.failures, code: slot.code })
+        log('worker-respawn', { id: slot.id, delayMs, failures: slot.failures })
         const timer = setTimeout(() => {
             timers.delete(timer)
             if (stopping || givenUp) return
@@ -114,6 +120,7 @@ export function createWorkerPool({
             ready: false,
             busy: false,
             dead: false,
+            counted: false,
             pending: new Map(),
             failures: 0,
             blocker: null,
@@ -186,7 +193,7 @@ export function createWorkerPool({
          * 掺进任何一种「也许重生就好」的失败就退回 null，让分发器按服务忙（503）回。
          */
         get blocker() {
-            if (this.readyCount > 0) return null
+            if (slots.some(slot => slot.ready)) return null
             if (slots.length === 0) return null
             return slots.every(slot => slot.blocker === ERROR_KINDS.SIGNER_UNAVAILABLE)
                 ? ERROR_KINDS.SIGNER_UNAVAILABLE
