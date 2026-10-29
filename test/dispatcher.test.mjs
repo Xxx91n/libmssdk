@@ -14,6 +14,7 @@ import { after, test } from 'node:test'
 
 const { createDispatcher } = await import('../src/dispatcher.mjs')
 const { fakePool, signedBody } = await import('./helpers/fake-pool.mjs')
+const { rawExchange } = await import('./helpers/raw-request.mjs')
 
 const config = {
     version: 'test',
@@ -151,23 +152,15 @@ test('客户端挂断之后，它占着的排队位置立刻还回来；槽位�
 
 /** 自己写一条 POST 并读到连接被关闭：只有这样才能分清「读到 503」和「被连接重置」。 */
 function rawPost(port, payload) {
-    return new Promise((resolve, reject) => {
-        const socket = net.connect(port, '127.0.0.1')
-        const chunks = []
-        let error = null
-        socket.on('error', cause => {
-            error = cause
-        })
-        socket.on('data', chunk => chunks.push(chunk))
-        socket.on('close', () => resolve({ text: Buffer.concat(chunks).toString('utf8'), error }))
-        socket.setTimeout(5000, () => {
-            socket.destroy()
-            reject(new Error('五秒内没等到连接关闭'))
-        })
-        const body = JSON.stringify(payload)
-        socket.write(
-            `POST /sign HTTP/1.1\r\nHost: 127.0.0.1\r\nauthorization: Bearer ${config.token}\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
-        )
+    const body = JSON.stringify(payload)
+    return rawExchange(port, {
+        requestLine: 'POST /sign',
+        headers: {
+            authorization: `Bearer ${config.token}`,
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(body),
+        },
+        body,
     })
 }
 
@@ -186,6 +179,29 @@ test('超出等待预算：客户端读到的是那个 503 与等待时长，不
     assert.match(text, /retry-after: 1/i, '头里带等待时长')
     assert.match(text, /"code":"BUSY"/, '体里带稳定原因码')
     assert.match(text, /"retry_after_seconds":1/)
+})
+
+test('畸形请求目标与畸形 Host 不会掀掉主进程：客户端拿到回应，后面的签名照常', async () => {
+    const pool = fakePool({ size: 1 })
+    const { baseUrl, port } = await serve(pool)
+
+    // `//` 这类请求目标 llhttp 照收，而 new URL() 对它会抛。修复前这里是 handler 里的
+    // unhandled rejection（Node 15+ 直接退进程）：客户端一个字节回应都拿不到。
+    const malformed = await rawExchange(port, { requestLine: 'POST //' })
+    assert.equal(malformed.error, null, `连接不该被重置：${malformed.error?.code || ''}`)
+    assert.match(malformed.text, /^HTTP\/1\.1 404 /, '畸形目标按「没这条路由」处理，不是把进程带走')
+
+    // Host 是调用方随手能写的内容：解析不再拿它拼 base，畸形值也就不再能碰坏解析。
+    // 走到鉴权那一步就是凭据：路由已经认出来了（没凭据回 401，而不是解析失败或连接断掉）。
+    const badHost = await rawExchange(port, { requestLine: 'POST /sign', headers: { host: 'a b' } })
+    assert.match(badHost.text, /^HTTP\/1\.1 401 /, 'Host 畸形不影响路由：照样认出 /sign')
+    assert.equal(pool.requests.length, 0, '没凭据的请求不该占 worker')
+
+    // 进程还活着：真请求照常派发、照常回 200
+    const pending = post(baseUrl, signPayload())
+    await until(() => pool.requests.length === 1, '畸形请求之后还能派发')
+    pool.complete(pool.requests[0].slotId, { kind: 'SUCCESS', body: signedBody() })
+    assert.equal((await pending).status, 200)
 })
 
 test('队列有上限：排不下的当场拒，而不是无限堆积到大家一起超时', async () => {

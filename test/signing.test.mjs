@@ -9,6 +9,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { after, before, test } from 'node:test'
 
+const { rawExchange } = await import('./helpers/raw-request.mjs')
+
 const here = path.dirname(fileURLToPath(import.meta.url))
 const mockBdms = path.join(here, 'fixtures', 'mock-bdms.mjs')
 
@@ -156,6 +158,21 @@ test('GET /healthz 不泄露凭据', async () => {
     assert.equal(payload.auth, true)
     assert.equal(payload.deviceId, '700***001')
     assert.equal(JSON.stringify(payload).includes('7000000000000001'), false)
+})
+
+// 默认路径（src/server.mjs）上同一条防线：解析函数是共用的，行为也得一样。
+// 修复前 handler 里的 `new URL()` 一抛就是 unhandled rejection（Node 15+ 直接退进程），
+// 一条匿名 `GET //` 就能把服务带走 —— 所以这里断言的是「进程还在、后面的请求还通」。
+test('畸形请求目标与畸形 Host 不会退掉进程', async () => {
+    const port = server.address().port
+
+    const malformed = await rawExchange(port, { requestLine: 'GET //' })
+    assert.equal(malformed.error, null, `连接不该被重置：${malformed.error?.code || ''}`)
+    assert.match(malformed.text, /^HTTP\/1\.1 404 /, '畸形目标按「没这条路由」处理')
+
+    const badHost = await rawExchange(port, { requestLine: 'GET /healthz', headers: { host: 'a b' } })
+    assert.match(badHost.text, /^HTTP\/1\.1 200 /, 'Host 不参与解析：健康检查照旧')
+    assert.match(badHost.text, /"ok":true/)
 })
 
 test('POST /probe 命中整曲时返回完整档位', async () => {

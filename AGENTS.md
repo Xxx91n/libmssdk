@@ -22,6 +22,7 @@ src/bdms.mjs         bdms.node 加载 / init / 签名；headers 展开和解析�
 src/contract.mjs     SignRequest 校验和 SignResponse 组装
 src/log.mjs          日志与脱敏：凭据只留长度，本机路径一律换掉
 src/auth.mjs         Bearer Token 比对（计时安全；老路径与分发器共用）
+src/route.mjs        路由解析：只从请求行取 pathname，Host 不参与，解析永不抛（两条路径共用）
 src/errors.mjs       失败分类：状态码 / 原因码映射表与等待时长（纯函数，默认路径尚未接线）
 src/dispatch.mjs     分发的纯判据：等待预算 / 队列上限 / worker 数推导 / 重生退避（时间从参数进来）
 src/warmup.mjs       就绪判据自学习：连续同长 + 结构下限，代码里没有绝对长度数字

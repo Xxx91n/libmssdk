@@ -12,6 +12,7 @@ import { isAuthorized } from './auth.mjs'
 import { errorResponse, normalizeSignRequest, signResponse, ValidationError } from './contract.mjs'
 import { buildTrackV2Request, summarizeTrackV2Response } from './probe.mjs'
 import { logError, logEvent } from './log.mjs'
+import { requestPathname } from './route.mjs'
 
 function readBody(request, limit) {
     return new Promise((resolve, reject) => {
@@ -45,7 +46,9 @@ async function postJson(url, body, headers, timeoutMs) {
 export function createServer({ config, signer }) {
     const server = http.createServer(async (request, response) => {
         const started = Date.now()
-        const url = new URL(request.url || '/', `http://${request.headers.host || '127.0.0.1'}`)
+        // 只取 pathname，且解析本身永不抛：这条 handler 是 async，抛出去就是 unhandled
+        // rejection，而一条匿名请求（`GET // HTTP/1.1`）就够触发。畸形目标按「没这条路由」处理。
+        const pathname = requestPathname(request)
         const send = (status, payload) => {
             const text = JSON.stringify(payload)
             response.statusCode = status
@@ -56,7 +59,7 @@ export function createServer({ config, signer }) {
         const authorized = () => isAuthorized(request, config)
 
         try {
-            if (url.pathname === '/healthz') {
+            if (pathname === '/healthz') {
                 send(200, {
                     ok: true,
                     service: 'libmssdk',
@@ -68,7 +71,7 @@ export function createServer({ config, signer }) {
                 })
                 return
             }
-            if (url.pathname === '/config') {
+            if (pathname === '/config') {
                 if (!authorized()) {
                     send(401, errorResponse('unauthorized', 'unauthorized'))
                     return
@@ -92,7 +95,7 @@ export function createServer({ config, signer }) {
                 })
                 return
             }
-            if (request.method !== 'POST' || !['/sign', '/probe', '/track/stream'].includes(url.pathname)) {
+            if (request.method !== 'POST' || !['/sign', '/probe', '/track/stream'].includes(pathname)) {
                 send(404, errorResponse('not found', 'not_found'))
                 return
             }
@@ -103,7 +106,7 @@ export function createServer({ config, signer }) {
 
             const payload = JSON.parse((await readBody(request, config.maxBodyBytes)) || '{}')
 
-            if (url.pathname === '/sign') {
+            if (pathname === '/sign') {
                 const spec = normalizeSignRequest(payload)
                 const signed = signer.sign({
                     url: spec.url,
@@ -146,7 +149,7 @@ export function createServer({ config, signer }) {
                 fullTrack: Boolean(summary.fullTrack),
                 elapsedMs: Date.now() - started,
             })
-            if (url.pathname === '/probe') {
+            if (pathname === '/probe') {
                 send(upstream.status === 200 ? 200 : 502, {
                     ok: Boolean(summary.accepted),
                     http: upstream.status,
@@ -173,7 +176,7 @@ export function createServer({ config, signer }) {
             })
         } catch (error) {
             const isValidation = error instanceof ValidationError
-            logError(`${request.method} ${url.pathname}: ${error.message}`)
+            logError(`${request.method} ${pathname ?? '(畸形请求目标)'}: ${error.message}`)
             send(isValidation ? 400 : 502, errorResponse(error.message, isValidation ? 'invalid_request' : 'signer_error'))
         }
     })

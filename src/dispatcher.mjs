@@ -21,6 +21,7 @@ import { errorResponse, normalizeSignRequest, ValidationError } from './contract
 import { GIVE_UP_WINDOW_MS, Queue, deriveWorkerCount, parsePositiveInt, shouldReject } from './dispatch.mjs'
 import { ERROR_KINDS, failureResponse } from './errors.mjs'
 import { logEvent, redactMachinePaths } from './log.mjs'
+import { requestPathname } from './route.mjs'
 import { createWorkerPool } from './workerpool.mjs'
 
 /** 客户端超时约 6 秒，留余量：预算是「还在服务里等」的时间，不包含它自己那头的网络时间。 */
@@ -232,10 +233,12 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
 
     const server = http.createServer(async (request, response) => {
         const startedAt = Date.now()
-        const url = new URL(request.url || '/', `http://${request.headers.host || '127.0.0.1'}`)
+        // 只取 pathname，且解析本身永不抛：这条 handler 是 async，抛出去就是 unhandled
+        // rejection，而一条匿名请求（`POST // HTTP/1.1`）就够触发。畸形目标按「没这条路由」处理。
+        const pathname = requestPathname(request)
         try {
             // 分发器只做签名这一件事：健康检查与诊断端点是 #9 的活，其余路由保持老的 404 形状
-            if (request.method !== 'POST' || url.pathname !== '/sign') {
+            if (request.method !== 'POST' || pathname !== '/sign') {
                 const body = JSON.stringify(errorResponse('not found', 'not_found'))
                 response.writeHead(404, {
                     'Content-Type': 'application/json; charset=utf-8',
@@ -256,7 +259,7 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
             } catch (error) {
                 // 非法 JSON、缺 url、体太长 —— 都是「改请求，别重试」
                 writeFailure(
-                    begin(response, { path: url.pathname }),
+                    begin(response, { path: pathname }),
                     failureResponse(ERROR_KINDS.INVALID_REQUEST, {
                         message: error instanceof ValidationError ? error.message : '请求体不是合法 JSON',
                     }),
@@ -291,7 +294,7 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
         } catch (error) {
             log('dispatcher-error', {
                 message: redactMachinePaths(String(error?.message || error), [config.bdmsModule, config.clientDir]),
-                path: url.pathname,
+                path: pathname,
             })
             if (!response.headersSent && !response.writableEnded) {
                 response.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })
