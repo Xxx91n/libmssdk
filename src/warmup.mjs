@@ -44,15 +44,15 @@ export function nextWarmup(state, values) {
     return { state: { streak, total, ready: streak >= REQUIRED_SAMPLES }, ready: streak >= REQUIRED_SAMPLES }
 }
 
-/** 连着几次采样毫无进展就考虑收手：那不是预热窗口，是坏了。 */
-const MAX_STALLED_SAMPLES = 5
+/** 连着几轮几乎不花时间就收手：那不是预热窗口，是坏了。 */
+const MAX_CHEAP_SAMPLES = 5
 
 /**
- * 一次「有代价的」采样至少要花多少毫秒。
+ * 一轮「有代价的」采样至少要花多少毫秒。
  *
- * 真模块签一次名要一百到几百毫秒，所以「同样的进展反复出现」是冷启动的正常现象，必须继续试。
- * 每次只要几微秒就说明调用根本没在做事 —— 那时不拦，就会拿整份预算把一颗核烧穿，
- * 还顺着逐台预热把后面的 worker 一起堵住。
+ * 真模块签一次名要一百到几百毫秒，所以慢不是问题：只要每轮都在做事，就一直试到预算用完。
+ * 每轮只要几微秒说明调用根本没在干活 —— 那时不拦，就会拿整份预算把一颗核烧穿，
+ * 而且逐台预热会把后面的 worker 一起堵住。
  */
 const MIN_USEFUL_SAMPLE_MS = 10
 
@@ -64,33 +64,33 @@ const MIN_USEFUL_SAMPLE_MS = 10
 export function settleWarmup({ sample, budgetMs, now = Date.now }) {
     const deadline = now() + budgetMs
     let state = WARMUP_START
-    let stalled = 0
-    let stalledFrom = 0
+    let cheap = 0
     let lastError = ''
     for (;;) {
+        const roundStart = now()
         let values = []
         try {
             values = sample()
+            lastError = ''
         } catch (error) {
             lastError = String(error?.message || error)
         }
-        const before = state
         const step = nextWarmup(state, values)
         state = step.state
         if (step.ready) return { ready: true }
-        // 「有进展」= 这份采样被判据认作一次有效计数：连续同长的轨迹往前走了
-        const progressed = state.streak !== before.streak || state.total !== before.total
-        if (progressed) {
-            stalled = 0
-        } else {
-            if (stalled === 0) stalledFrom = now()
-            stalled += 1
-        }
-        if (stalled >= MAX_STALLED_SAMPLES && (now() - stalledFrom) / stalled < MIN_USEFUL_SAMPLE_MS) {
-            return { ready: false, reason: lastError || '输出一直过不了结构下限', stalled, spun: true }
-        }
+        // 只看这一轮花了多少时间，不看判据走到哪一步：
+        // 把「长度在抖」当成进展就会漏掉一整类坏法（值一直过不了结构下限、或一直来回摆）
+        cheap = now() - roundStart < MIN_USEFUL_SAMPLE_MS ? cheap + 1 : 0
         if (now() >= deadline) {
-            return { ready: false, reason: `预热 ${budgetMs}ms 内输出长度没收敛`, stalled }
+            return { ready: false, reason: `预热 ${budgetMs}ms 内输出长度没收敛`, cheap }
+        }
+        if (cheap >= MAX_CHEAP_SAMPLES) {
+            return {
+                ready: false,
+                reason: lastError || '输出一直过不了结构下限',
+                cheap,
+                spun: true,
+            }
         }
     }
 }
