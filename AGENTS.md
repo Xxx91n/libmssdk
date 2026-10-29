@@ -24,8 +24,10 @@ src/probe.mjs        track_v2 真机自检和整曲 / 试听判定
 src/server.mjs       HTTP 路由
 src/index.mjs        CLI：serve / bridge / selftest / probe / config
 test/                使用 mock-bdms 的离线测试
+tools/               手动脚本（打真机，不进 npm test，不随包发布）
 docs/CONTRACT.md     服务契约
 docs/DEPLOY-WINDOWS.md Windows 部署
+docs/INVESTIGATION-DEVICE-ENTITLEMENT.md 设备身份与整曲权益的对照实验与结论
 deploy/README.md     Docker 部署
 ```
 
@@ -34,7 +36,9 @@ deploy/README.md     Docker 部署
 1. **官方二进制不入库**：`bdms.node`、`metasecml.dll` 不提交、不发布、不再分发。
 2. **签名覆盖 URL + 全部请求头**：`/sign` 收到的 headers 必须是调用方真实发送的一份。
 3. **`x-ss-stub` 是 body 的 MD5 大写**，既是签名输入，也要随请求发送。
-4. **设备成套**：`device_id` / `iid` / `fp` 必须与 `bdms.init({ deviceId })` 一致。
+4. **设备号自洽**：`device_id` / `iid` / `fp` 与 `bdms.init({ deviceId })` 用同一份——
+   这是本服务的内部约定（省掉每请求重新 `init`），**不是上游的强制要求**：实测上游不要求
+   签名设备与账号登录设备一致，见 `docs/INVESTIGATION-DEVICE-ENTITLEMENT.md`。
 5. **空响应不代表接口故障**：签名不符时服务端可能返回 HTTP 200 + 0 bytes。
    是否成功必须用 `/probe` 的 `fullTrack` 判定。
 6. **不记录凭据**：日志只允许请求形状、签名长度和脱敏设备号。
