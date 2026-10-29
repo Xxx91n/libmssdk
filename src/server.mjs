@@ -7,18 +7,11 @@
 //   POST /track/stream     /probe 的别名，返回更贴近播放器的字段
 
 import http from 'node:http'
-import crypto from 'node:crypto'
 import { maskDeviceId } from './config.mjs'
+import { isAuthorized } from './auth.mjs'
 import { errorResponse, normalizeSignRequest, signResponse, ValidationError } from './contract.mjs'
 import { buildTrackV2Request, summarizeTrackV2Response } from './probe.mjs'
 import { logError, logEvent } from './log.mjs'
-
-function timingSafeEqual(a, b) {
-    const left = Buffer.from(String(a))
-    const right = Buffer.from(String(b))
-    if (left.length !== right.length) return false
-    return crypto.timingSafeEqual(left, right)
-}
 
 function readBody(request, limit) {
     return new Promise((resolve, reject) => {
@@ -60,12 +53,7 @@ export function createServer({ config, signer }) {
             response.setHeader('Content-Length', Buffer.byteLength(text))
             response.end(text)
         }
-        const authorized = () => {
-            if (!config.token) return config.allowAnonymous || true
-            const header = request.headers.authorization || ''
-            const token = header.startsWith('Bearer ') ? header.slice(7) : ''
-            return token.length > 0 && timingSafeEqual(token, config.token)
-        }
+        const authorized = () => isAuthorized(request, config)
 
         try {
             if (url.pathname === '/healthz') {
