@@ -38,7 +38,18 @@ after(async () => {
         for (const child of entry.children) child.kill()
         await new Promise(resolve => entry.server.close(resolve))
     }
+    // 断在中间也要收：临时目录留在 os.tmpdir 里没人负责删
+    for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true })
 })
+
+const tempDirs = []
+
+/** 临时 state 目录要活到用例结束（worker 重生时还要再读一次），所以只在收工后统一删。 */
+function tempStateDir() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'libmssdk-worker-'))
+    tempDirs.push(dir)
+    return dir
+}
 
 /** 起一套真的：按 startDispatcher 的生产装配，只把 fork 包一层好拿到进程句柄。 */
 async function startReal({ workers, unstableCalls = 0, signDelayMs = 0, stateDir }) {
@@ -112,10 +123,10 @@ async function post(baseUrl, payload) {
 
 test('真进程：身份只读、预热自学习、杀在飞的那台之后槽位收得回', async () => {
     // 主进程 fork 之前先把身份准备好；worker 那条路径上只有 readStoredIdentity
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'libmssdk-worker-'))
+    // 前两次输出比稳态短（真机 init 之后就有这么一段窗口），单次调用同步占住 300ms
+    const dir = tempStateDir()
     const prepared = prepareStoredIdentity({ dir })
     const before = fs.readFileSync(path.join(dir, 'identity.json'), 'utf8')
-    // 前两次输出比稳态短（真机 init 之后就有这么一段窗口），单次调用同步占住 300ms
     const { pool, children, notes, baseUrl } = await startReal({
         workers: 1,
         unstableCalls: 2,
@@ -157,8 +168,11 @@ test('真进程：身份只读、预热自学习、杀在飞的那台之后槽�
     const payload = JSON.parse(recovery.text)
     assert.equal(payload.headers['X-Helios'].startsWith('mock-helios-'), true)
     assert.equal(payload.headers['X-Medusa'].startsWith('mock-medusa-'), true)
-    fs.rmSync(dir, { recursive: true, force: true })
+    // 收工前确认这台 worker 从头到尾没碰过身份文件
+    assert.equal(fs.readFileSync(path.join(dir, 'identity.json'), 'utf8'), before)
 })
+
+
 
 test('真进程多开：杀掉一台，其余继续服务，不需要有人介入', async () => {
     const { pool, children, baseUrl } = await startReal({ workers: 2 })
