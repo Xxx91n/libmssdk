@@ -323,3 +323,16 @@ test('只来 error 不来 exit 的死亡也计入反复退出：不然退避会�
     assert.equal(spawnOrder.length, 5, '放弃之后不再拉新的')
     await pool.stop()
 })
+
+test('管道断了但进程还在：补一台之前先把这台关掉，别留白占原生模块的孤儿', async () => {
+    const { pool, workers, spawnOrder } = healthy(1, { autoReady: true, respawnBaseMs: 5 })
+    await pool.start()
+
+    // 只来 disconnect，没有 exit —— 真进程「卡在原生调用里把通道弄断」就是这个形状
+    workers[0].emit('disconnect')
+    assert.deepEqual(workers[0].killed, [undefined], '断开的那台要被关掉')
+    await waitFor(() => spawnOrder.length === 2, '再补一台')
+    await waitFor(() => pool.readyCount === 1, '补上来的那台预热到就绪')
+    assert.equal(workers.length, 2, '补上来的是新进程，不是那台孤儿')
+    await pool.stop()
+})

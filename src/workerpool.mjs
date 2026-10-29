@@ -48,7 +48,6 @@ export function createWorkerPool({
         slot.blocker = null
         slot.dead = false
         slot.counted = false
-        slot.code = null
         transport.on('message', message => handleMessage(slot, message))
         // child_process 的 'error'（spawn 失败、IPC 通道坏掉）没人接就是主进程的未捕获异常 ——
         // 这个 process 正是服务本身。而且它可能不带随后的 exit（比如 node 可执行文件本身
@@ -62,7 +61,6 @@ export function createWorkerPool({
         // 槽位会冒出两台进程；但「退出码」只有 exit 才知道，所以计数单独走 countExit ——
         // 拿 disconnect 的 null 当「非零退出」会把「5 次非零」悄悄变成「5 次任何退出」。
         transport.on('exit', code => {
-            slot.code = code
             countExit(slot, code)
             gone(slot)
         })
@@ -73,6 +71,10 @@ export function createWorkerPool({
     function gone(slot) {
         if (slot.dead) return
         slot.dead = true
+        // 管道断了但进程还可能活着（比如它卡在原生调用里）。补一台之前先把这台关掉，
+        // 否则每个事件都留下一个白占一份原生模块与内存的孤儿。
+        // 真 exit 之后 kill 只是返回 false；关闭流程里由 stop 负责发 shutdown，这里不插手。
+        if (!stopping) slot.transport.kill()
         reclaim(slot)
         slot.settle()
         scheduleRespawn(slot)

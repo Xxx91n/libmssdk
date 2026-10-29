@@ -11,6 +11,7 @@ export class FakeWorker extends EventEmitter {
         super()
         this.id = `worker-${index}`
         this.sent = []
+        this.killed = []
         this.exited = false
     }
 
@@ -54,6 +55,12 @@ export class FakeWorker extends EventEmitter {
     /** 只有 'error'、没有随后的 'exit'：真 child_process 在 spawn 失败时就是这样。 */
     fail(error) {
         this.emit('error', error)
+    }
+
+    /** 池子补一台之前要先把这台的通道关掉；这里只记录，不再触发 exit（不然就成了自杀自收）。 */
+    kill(signal) {
+        this.killed.push(signal)
+        return true
     }
 
     exit(code = 1) {
