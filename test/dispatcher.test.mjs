@@ -112,6 +112,10 @@ test('客户端挂断之后，它占着的排队位置立刻还回来；槽位�
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
     const port = server.address().port
     const baseUrl = `http://127.0.0.1:${port}`
+    // 服务端这一侧的连接：once() 当场挂上监听，所以「先关后等」也不会漏掉事件
+    // —— 要等的是「服务端知道连接断了」这个事实，不是猜一个时长
+    const serverCloses = []
+    server.on('connection', socket => serverCloses.push(once(socket, 'close')))
 
     // 唯一那台占住在飞：任何请求都只能排队
     const held = pool.lease()
@@ -129,9 +133,9 @@ test('客户端挂断之后，它占着的排队位置立刻还回来；槽位�
 
     socket.destroy()
     await once(socket, 'close')
-    // 服务端要知道这条连接断了，中间隔着一次网络事件：Linux 上不给这一拍，槽位会被
-    // 已经死掉的请求抢走（CI 实测翻过一次脸）。这不是「等一个结果」，是等一个交付。
-    await new Promise(resolve => setTimeout(resolve, 150))
+    // 客户端 destroy 之后服务端要过一问才知道连接断了：Linux 上 CI 就是栽在这一拍上，
+    // 槽位被一条已经死掉的请求抢走。等到这里，队列里那一条已经被摘掉，后面的断言没有竞态。
+    await serverCloses[0]
 
     // 挂断之后位置要还回来：还回来才谈得上「排得下」，否则这条又会被当场拒
     const pending = post(baseUrl, signPayload({ url: 'https://api.qishui.com/alive' }))
