@@ -14,8 +14,8 @@ import { parsePositiveInt } from './dispatch.mjs'
 import { signResponse } from './contract.mjs'
 import { ERROR_KINDS } from './errors.mjs'
 import { readStoredIdentity } from './identity.mjs'
-import { logWarn, redactMachinePaths } from './log.mjs'
-import { WARMUP_START, nextWarmup } from './warmup.mjs'
+import { redactMachinePaths } from './log.mjs'
+import { settleWarmup } from './warmup.mjs'
 
 const env = key => (process.env[key] || '').trim()
 
@@ -67,24 +67,6 @@ function describeError(error, modulePath) {
  * 判据里没有、也不该有任何绝对长度数字 —— 换一个客户端版本的原生模块，稳态长度就可能变，
  * 写死的那台机器会永远停在「没就绪」。这里也不 sleep：签一次本身就要一百多毫秒，循环本身就是节奏。
  */
-function warmUp(signer, probe, budgetMs) {
-    const deadline = Date.now() + budgetMs
-    let state = WARMUP_START
-    for (;;) {
-        let values = []
-        try {
-            values = Object.values(signer.sign(probe).headers)
-        } catch (error) {
-            // 算不出来就当成一份不合格的采样：长度轨迹被打断，计数从零开始
-            logWarn('warmup-sign', { level: 'warn', message: describeError(error, signer.modulePath) })
-        }
-        const step = nextWarmup(state, values)
-        state = step.state
-        if (step.ready) return { ready: true }
-        if (Date.now() >= deadline) return { ready: false, samples: state.streak }
-    }
-}
-
 function handleTask(signer, message) {
     const request = message.request || {}
     const startedAt = Date.now()
@@ -134,10 +116,14 @@ function main() {
         // 进程不退：这台不算进「能服务」，别的 worker 照常干活。
     } else {
         const budgetMs = parsePositiveInt(env('LIBMSSDK_WARMUP_BUDGET_MS'), 30_000)
-        const warmup = warmUp(signer, warmupProbe(identity.deviceId), budgetMs)
+        const probe = warmupProbe(identity.deviceId)
+        const warmup = settleWarmup({
+            budgetMs,
+            sample: () => Object.values(signer.sign(probe).headers),
+        })
         if (warmup.ready) send({ type: 'ready' })
         // 预算内没收敛：保持未就绪、进程不退。原因写清楚，别让主进程只剩一个数字
-        else send({ type: 'warmup-failed', kind: ERROR_KINDS.INTERNAL_ERROR, reason: `预热 ${budgetMs}ms 内输出长度没收敛` })
+        else send({ type: 'warmup-failed', kind: ERROR_KINDS.INTERNAL_ERROR, reason: warmup.reason })
     }
 
     process.on('message', message => {

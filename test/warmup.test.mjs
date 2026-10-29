@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-const { WARMUP_START, nextWarmup } = await import('../src/warmup.mjs')
+const { WARMUP_START, nextWarmup, settleWarmup } = await import('../src/warmup.mjs')
 
 /** 按顺序喂采样，返回每次的 ready 轨迹 —— 就绪只由「外部看得见的输出形状」决定。 */
 function feed(samples) {
@@ -54,4 +54,43 @@ test('中途抖一次重新数；就绪之后定住，不会因为一次异常�
         [false, false, true, true, true, true],
         '就绪是定住的：正在服务的 worker 不该被撤回',
     )
+})
+
+test('采样循环：靠一次成功的调用就定下就绪，不需要谁提醒它', () => {
+    const steady = ['AAAAAAAA', 'BBBBBBBB']
+    const result = settleWarmup({ sample: () => steady, budgetMs: 30_000 })
+    assert.equal(result.ready, true)
+})
+
+test('模块抛得飞快时不许空转：连着几次抛就收，别把一颗核烧到预算用完', () => {
+    let calls = 0
+    let nowValue = 0
+    const result = settleWarmup({
+        budgetMs: 30_000,
+        now: () => nowValue,
+        sample: () => {
+            calls += 1
+            throw new Error('bdms.node 不存在')
+        },
+    })
+    assert.equal(result.ready, false)
+    assert.equal(result.thrown, 5, '第 5 次抛就停')
+    assert.equal(calls, 5, '时钟一次都没走，也不该一直签下去')
+    assert.match(result.reason, /bdms\.node 不存在/, '把抛出来的原因带回去')
+})
+
+test('预算用完还没收敛：报的是「没等到稳态」，进程照旧活着', () => {
+    let calls = 0
+    const result = settleWarmup({
+        budgetMs: 1000,
+        now: () => calls * 100,
+        // 长度一次短一次长地摆，永远凑不满「连续三次同长」
+        sample: () => {
+            calls += 1
+            return calls % 2 === 1 ? ['AAAA'] : ['AAAAAAAAAA']
+        },
+    })
+    assert.equal(result.ready, false)
+    assert.match(result.reason, /预热 1000ms 内输出长度没收敛/)
+    assert.equal(calls, 10, '采满预算就停，不许多跑')
 })

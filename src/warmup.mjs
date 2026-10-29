@@ -43,3 +43,35 @@ export function nextWarmup(state, values) {
     const streak = state.total === total ? state.streak + 1 : 1
     return { state: { streak, total, ready: streak >= REQUIRED_SAMPLES }, ready: streak >= REQUIRED_SAMPLES }
 }
+
+/** 连着几次「这一下直接抛」就停：那不是预热窗口，是坏了。 */
+const MAX_THROWN_SAMPLES = 5
+
+/**
+ * 用固定探针循环采样，直到判据说「稳了」。
+ *
+ * sample 与 now 都是传进来的：真模块一次签名要一两百毫秒，循环本身就是节奏，不需要 sleep；
+ * 但模块抛得飞快时（配置坏了、原生模块加载不了）这个前提就不成立了，不拦就会拿整份预算
+ * 把一颗核空转掉，还顺着逐台预热把后面的 worker 一起堵住。
+ */
+export function settleWarmup({ sample, budgetMs, now = Date.now }) {
+    const deadline = now() + budgetMs
+    let state = WARMUP_START
+    let thrown = 0
+    let lastError = ''
+    for (;;) {
+        let values = []
+        try {
+            values = sample()
+            thrown = 0
+        } catch (error) {
+            thrown += 1
+            lastError = String(error?.message || error)
+        }
+        const step = nextWarmup(state, values)
+        state = step.state
+        if (step.ready) return { ready: true }
+        if (thrown >= MAX_THROWN_SAMPLES) return { ready: false, reason: lastError, thrown }
+        if (now() >= deadline) return { ready: false, reason: `预热 ${budgetMs}ms 内输出长度没收敛` }
+    }
+}
