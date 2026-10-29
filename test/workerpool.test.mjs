@@ -186,7 +186,7 @@ test('单个 worker 预热失败：它保持未就绪，但进程不退出', asy
     workers[0].report({ type: 'warmup-failed', budgetMs: 30_000 })
     await tick()
     assert.equal(pool.readyCount, 0, '预热没过去就是没就绪，不能假装能服务')
-    assert.equal(workers[0].killed.length, 0, '进程不退出：一次预热失败不该把这台机器判死')
+    assert.equal(workers.length, 2, '进程不退出也不换：一次预热失败不该把这台机器判死，也不该提前拉出替补')
     assert.equal(workers.length, 2, '等前一台把话说完，才拉下一台')
 
     workers[1].reportReady()
@@ -275,4 +275,28 @@ test('退避途中关池子：不再对已经没了的通道 send', async () => 
         workers.some(worker => worker.sent.some(message => message.type === 'shutdown')),
         '活着的那台要收到关闭指令，不能因为跳过死的就谁都跳过',
     )
+})
+
+test('干净的 exit(0) 不算进「反复退出」：判据数的是非零退出', async () => {
+    let giveUps = 0
+    const { pool, workers, spawnOrder } = healthy(1, {
+        autoReady: false,
+        respawnBaseMs: 1,
+        respawnCapMs: 1,
+        onGiveUp: () => {
+            giveUps += 1
+        },
+    })
+    const starting = pool.start()
+    workers[0].reportReady()
+    await starting
+
+    for (let index = 0; index < 5; index += 1) {
+        workers.at(-1).exit(0)
+        await waitFor(() => spawnOrder.length === index + 2, `第 ${index + 1} 次重生`)
+    }
+    assert.equal(giveUps, 0, '五次都是干净退出：这台机器没坏，只是进程自己走了')
+    workers.at(-1).reportReady()
+    assert.ok(pool.lease(), '重生出来的那台照常就绪待命')
+    await pool.stop()
 })

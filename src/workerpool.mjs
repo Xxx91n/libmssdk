@@ -11,6 +11,7 @@
 
 import { EventEmitter } from 'node:events'
 import { ERROR_KINDS } from './errors.mjs'
+import { redactMachinePaths } from './log.mjs'
 import { GIVE_UP_WINDOW_MS, backoffDelayMs, shouldGiveUp } from './dispatch.mjs'
 
 /** 槽位没了（进程崩了 / 管道断了）：在飞的请求按「内部算错」收口，不能让调用方永远等。 */
@@ -46,18 +47,63 @@ export function createWorkerPool({
         slot.busy = false
         slot.blocker = null
         slot.dead = false
+        slot.code = null
         transport.on('message', message => handleMessage(slot, message))
-        // 一次死亡会来两个事件（管道先断、进程随后退出），只认第一个：
-        // 每个槽位同时只能有一个重生计划，否则一个位置会冒出两台进程。
-        transport.on('exit', code => gone(slot, code))
-        transport.on('disconnect', () => gone(slot, null))
+        // child_process 的 'error'（spawn 失败、IPC 通道坏掉）没人接就是主进程的未捕获异常 ——
+        // 这个 process 正是服务本身。接住它，并按「这台没了」走同一条回收路。
+        transport.on('error', error => {
+            log('worker-error', { id: slot.id, message: redactMachinePaths(String(error?.message || error)) })
+            gone(slot)
+        })
+        // 真进程死一次会来两个事件（disconnect 先、exit 随后）。回收与重生只认第一个，否则一个
+        // 槽位会冒出两台进程；但「退出码」只有 exit 才知道，所以计数单独走 countExit ——
+        // 拿 disconnect 的 null 当「非零退出」会把「5 次非零」悄悄变成「5 次任何退出」。
+        transport.on('exit', code => {
+            slot.code = code
+            gone(slot)
+            countExit(code)
+        })
+        transport.on('disconnect', () => gone(slot))
         return transport
     }
 
-    function gone(slot, code) {
+    function gone(slot) {
         if (slot.dead) return
         slot.dead = true
-        handleExit(slot, code)
+        reclaim(slot)
+        slot.settle()
+        scheduleRespawn(slot)
+    }
+
+    function countExit(code) {
+        if (stopping || code === 0) return
+        const now = Date.now()
+        // 只留窗口内那几次：这是一台要跑很多天的常驻进程，不能一直攒退出记录
+        exits.push(now)
+        while (exits.length > 0 && now - exits[0] > GIVE_UP_WINDOW_MS) exits.shift()
+        if (!shouldGiveUp(exits, now, { windowMs: GIVE_UP_WINDOW_MS })) return
+        if (givenUp) return
+        givenUp = true
+        // 已经排好的重生全部作废：继续重试只是把「机器坏了」拖成「谁都不知道坏了」
+        for (const timer of timers) clearTimeout(timer)
+        timers.clear()
+        log('worker-giveup', { exits: exits.length, code })
+        onGiveUp()
+    }
+
+    function scheduleRespawn(slot) {
+        if (stopping || givenUp) return
+        slot.failures += 1
+        const delayMs = backoffDelayMs(slot.failures, { baseMs: respawnBaseMs, capMs: respawnCapMs })
+        log('worker-respawn', { id: slot.id, delayMs, failures: slot.failures, code: slot.code })
+        const timer = setTimeout(() => {
+            timers.delete(timer)
+            if (stopping || givenUp) return
+            bind(slot)
+        }, delayMs)
+        // 退避计时器不该把「本来该退出的进程」留在世上
+        timer.unref()
+        timers.add(timer)
     }
 
     function attach(index) {
@@ -122,37 +168,6 @@ export function createWorkerPool({
         slot.pending.clear()
     }
 
-    function handleExit(slot, code) {
-        reclaim(slot)
-        slot.settle()
-        if (stopping) return
-        if (code !== 0) {
-            // 只留窗口内那几次：这是一台要跑很多天的常驻进程，不能一直攒退出记录
-            const now = Date.now()
-            exits.push(now)
-            while (exits.length > 0 && now - exits[0] > GIVE_UP_WINDOW_MS) exits.shift()
-        }
-        if (shouldGiveUp(exits, Date.now(), { windowMs: GIVE_UP_WINDOW_MS })) {
-            if (!givenUp) {
-                givenUp = true
-                log('worker-giveup', { exits: exits.length, code })
-                onGiveUp()
-            }
-            return
-        }
-        slot.failures += 1
-        const delayMs = backoffDelayMs(slot.failures, { baseMs: respawnBaseMs, capMs: respawnCapMs })
-        log('worker-respawn', { id: slot.id, delayMs, failures: slot.failures, code })
-        const timer = setTimeout(() => {
-            timers.delete(timer)
-            if (stopping || givenUp) return
-            bind(slot)
-        }, delayMs)
-        // 退避计时器不该把「本来该退出的进程」留在世上
-        timer.unref()
-        timers.add(timer)
-    }
-
     return {
         get size() {
             return workerCount
@@ -160,7 +175,7 @@ export function createWorkerPool({
         get readyCount() {
             return slots.filter(slot => slot.ready).length
         },
-        /** 在飞的签名数：黑盒用例靠它确认「这台正忙着」，#9 的诊断端点也要读这个数。 */
+        /** 在飞的签名数：黑盒用例靠它确认「真 worker 此刻正忙着」，才敢下手杀进程。 */
         get busyCount() {
             return slots.filter(slot => slot.busy).length
         },
@@ -189,6 +204,9 @@ export function createWorkerPool({
             return {
                 id: slot.id,
                 run(request) {
+                    // lease 与 run 之间一般没有事件循环，但通道坏了的时候这一句就是最后一道：
+                    // 同步 throw 会从 drain() 里逃出去，变成主进程的未处理异常
+                    if (slot.dead) return Promise.reject(new WorkerLost(slot.id))
                     const id = `r${(requests += 1)}`
                     slot.transport.send({ type: 'sign', id, request })
                     return new Promise((resolve, reject) => {

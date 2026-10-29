@@ -10,7 +10,6 @@ export class FakeWorker extends EventEmitter {
         super()
         this.id = `worker-${index}`
         this.sent = []
-        this.killed = []
         this.exited = false
     }
 
@@ -53,10 +52,5 @@ export class FakeWorker extends EventEmitter {
 
     exit(code = 1) {
         this.emit('exit', code)
-    }
-
-    kill(signal) {
-        this.killed.push(signal)
-        return true
     }
 }
