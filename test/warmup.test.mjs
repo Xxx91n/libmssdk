@@ -75,8 +75,8 @@ test('模块抛得飞快时不许空转：连着几次抛就收，别把一颗�
     })
     assert.equal(result.ready, false)
     assert.equal(result.spun, true, '时钟一次没走 = 调用根本没在做事，这才叫空转')
-    assert.equal(result.cheap, 5, '第 5 轮不花时间就停')
-    assert.equal(calls, 5, '时钟一次都没走，也不该一直签下去')
+    assert.equal(result.cheap, 10, '连续 10 轮不花时间才停')
+    assert.equal(calls, 10, '时钟一次都没走，也不该一直签下去')
     assert.match(result.reason, /bdms\.node 不存在/, '把抛出来的原因带回去')
 })
 
@@ -126,7 +126,7 @@ test('不抛错但一直过不了结构下限，也是空转：不能让它把�
     })
     assert.equal(result.ready, false)
     assert.equal(result.spun, true, '每次采样只花几微秒 —— 这就是没在做事')
-    assert.equal(calls, 5, '五轮无进展就收，不拿 30 秒把一颗核烧穿')
+    assert.equal(calls, 10, '十轮不花时间就收，不拿 30 秒把一颗核烧穿')
 })
 
 test('长度一直在摆、每轮又几乎不花时间：同样算空转，不能拿它烧穿预算', () => {
@@ -142,7 +142,7 @@ test('长度一直在摆、每轮又几乎不花时间：同样算空转，不�
     })
     assert.equal(result.ready, false)
     assert.equal(result.spun, true)
-    assert.equal(calls, 5, '五轮就收')
+    assert.equal(calls, 10, '十轮就收')
 })
 
 test('预算小到一轮都跑不完时，报的还是预算那条', () => {

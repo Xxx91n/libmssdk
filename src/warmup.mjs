@@ -44,8 +44,13 @@ export function nextWarmup(state, values) {
     return { state: { streak, total, ready: streak >= REQUIRED_SAMPLES }, ready: streak >= REQUIRED_SAMPLES }
 }
 
-/** 连着几轮几乎不花时间就收手：那不是预热窗口，是坏了。 */
-const MAX_CHEAP_SAMPLES = 5
+/**
+ * 连着几轮几乎不花时间就收手：那不是预热窗口，是坏了。
+ *
+ * 这个数要明显大于就绪所需的 3 次，否则一个「签得快但还需要多等两轮才稳」的模块会被
+ * 误判成坏的；对真的坏了的模块来说，多跑五轮也不过是几微秒。
+ */
+const MAX_CHEAP_SAMPLES = 10
 
 /**
  * 一轮「有代价的」采样至少要花多少毫秒。
@@ -87,7 +92,7 @@ export function settleWarmup({ sample, budgetMs, now = Date.now }) {
         if (cheap >= MAX_CHEAP_SAMPLES) {
             return {
                 ready: false,
-                reason: lastError || '输出一直过不了结构下限',
+                reason: lastError || '输出形状一直不稳定（过不了结构下限，或长度反复变化）',
                 cheap,
                 spun: true,
             }
