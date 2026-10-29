@@ -32,6 +32,9 @@ const QUEUE_LIMIT_PER_WORKER = 4
 /** 503 写完之后的宽限：让字节先出去，别让客户端在上传中途读到连接重置。 */
 const CLOSE_GRACE_MS = 300
 
+/** 与 loadConfig 的默认值一致；配置给得不像话时退回它，而不是退回「无限」。 */
+const DEFAULT_MAX_BODY_BYTES = 256 * 1024
+
 /** 体太长：除了「改请求」，还要在回包之后把这条连接关掉（已经收不完的字节了）。 */
 class OversizeBody extends ValidationError {}
 
@@ -90,8 +93,20 @@ function prebuildBusy() {
 export function createDispatcher({ config, pool, log = logEvent } = {}) {
     const waitBudgetMs = parsePositiveInt(config.waitBudgetMs, DEFAULT_WAIT_BUDGET_MS)
     const queueLimit = parsePositiveInt(config.queueLimit, pool.size * QUEUE_LIMIT_PER_WORKER)
+    // 只信 config 给的数：一个手抖写成 abc 的 LIBMSSDK_MAX_BODY_BYTES 会让 size > limit
+    // 永远不成立，于是每个请求体都被无上限缓冲进内存
+    const maxBodyBytes = parsePositiveInt(config.maxBodyBytes, DEFAULT_MAX_BODY_BYTES)
     const queue = new Queue(queueLimit)
     const busy503 = prebuildBusy()
+
+    /** 每条连接一个 item：closed 只在这里挂，漏挂就会往已经断开的连接上写回包。 */
+    function begin(response, shape) {
+        const item = { response, shape, startedAt: Date.now(), enqueuedAt: 0, closed: false }
+        response.on('close', () => {
+            item.closed = true
+        })
+        return item
+    }
 
     /** 写完让字节先出去，再隔一小段才关：直接销毁会让客户端读到连接重置而不是这个回包。 */
     function endAfterFlush(response) {
@@ -134,11 +149,13 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
 
     function writeResult(item, slot, outcome) {
         if (item.closed) return
+        // queuedMs 是「在队列里躺着」的那一段，不含 worker 自己算的时间
+        const queuedMs = item.enqueuedAt && item.leasedAt ? item.leasedAt - item.enqueuedAt : 0
         log('sign', {
             ...item.shape,
             worker: slot.id,
             elapsedMs: Date.now() - item.startedAt,
-            queuedMs: item.enqueuedAt ? Date.now() - item.enqueuedAt : 0,
+            queuedMs,
         })
         const body = JSON.stringify(outcome.body)
         item.response.writeHead(200, {
@@ -150,6 +167,7 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
 
     /** 派发给一台 worker。槽位在 worker 报告完成之前不回池，所以这里不留「超时重试」。 */
     function assign(item, slot) {
+        item.leasedAt = Date.now()
         slot.run(item.request).then(
             outcome => {
                 if (outcome?.kind === ERROR_KINDS.SUCCESS) {
@@ -218,26 +236,18 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
                 return
             }
             if (!isAuthorized(request, config)) {
-                const item = { response, closed: false, shape: { path: '/sign' } }
-                response.on('close', () => {
-                    item.closed = true
-                })
-                writeFailure(item, failureResponse(ERROR_KINDS.UNAUTHORIZED, { message: '缺少或错误的 Bearer Token' }))
+                writeFailure(begin(response, { path: '/sign' }), failureResponse(ERROR_KINDS.UNAUTHORIZED, { message: '缺少或错误的 Bearer Token' }))
                 return
             }
 
             let spec
             try {
-                const text = (await readBody(request, config.maxBodyBytes)).toString('utf8')
+                const text = (await readBody(request, maxBodyBytes)).toString('utf8')
                 spec = normalizeSignRequest(JSON.parse(text || '{}'))
             } catch (error) {
                 // 非法 JSON、缺 url、体太长 —— 都是「改请求，别重试」
-                const item = { response, closed: false, shape: { path: url.pathname } }
-                response.on('close', () => {
-                    item.closed = true
-                })
                 writeFailure(
-                    item,
+                    begin(response, { path: url.pathname }),
                     failureResponse(ERROR_KINDS.INVALID_REQUEST, {
                         message: error instanceof ValidationError ? error.message : '请求体不是合法 JSON',
                     }),
@@ -246,17 +256,7 @@ export function createDispatcher({ config, pool, log = logEvent } = {}) {
                 return
             }
 
-            const item = {
-                request: spec,
-                response,
-                startedAt,
-                enqueuedAt: 0,
-                closed: false,
-                shape: requestShape(spec, config),
-            }
-            response.on('close', () => {
-                item.closed = true
-            })
+            const item = { ...begin(response, requestShape(spec, config)), request: spec, startedAt }
 
             if (pool.blocker) {
                 writeFailure(item, failureResponse(pool.blocker, { message: '签名模块没加载或配置错' }))
@@ -346,6 +346,9 @@ export function startDispatcher({
 
     const server = createDispatcher({ config: { ...config, ...limits }, pool, log })
     // start() 只会 resolve（每台 worker 的 settled 没有 reject 路径），但 spawn 本身可能同步抛
-    pool.start().catch(error => log('dispatcher-start-failed', { message: String(error?.message || error) }))
+    pool.start().catch(error =>
+        log('dispatcher-start-failed', {
+            message: redactMachinePaths(String(error?.message || error), [config.bdmsModule, config.clientDir]),
+        }))
     return { server, pool }
 }
