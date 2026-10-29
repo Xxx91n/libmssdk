@@ -96,13 +96,15 @@ test('worker 崩了：在飞的请求被清理，槽位不会永久停在忙', a
 })
 
 test('worker 退出后按指数退避重生，重生完继续能服务', async () => {
-    const { pool, workers, spawnOrder, byId } = healthy(1, { autoReady: true, respawnBaseMs: 30 })
+    const { pool, workers, spawnOrder, byId, notes } = healthy(1, { autoReady: true, respawnBaseMs: 30, respawnCapMs: 30 })
     await pool.start()
 
     workers[0].exit(1)
     assert.equal(pool.readyCount, 0, '没了就是没了，不能还挂着就绪')
-    await tick()
-    assert.equal(spawnOrder.length, 1, '退避窗口内不急着重生')
+    // 不靠「跑一个 tick 看它还没重生」来证明等待存在：机器一忙，一个 30ms 的计时器
+    // 完全可能比这一拍先跑完（并行跑整包时就这么翻过一次脸）。直接看池子自己宣布的时长。
+    const planned = notes.find(note => note.event === 'worker-respawn')
+    assert.equal(planned.detail.delayMs, 30, '重生要等满退避窗口，不是立刻')
 
     await waitFor(() => spawnOrder.length === 2, '退避之后该重生')
     await waitFor(() => pool.readyCount === 1, '重生后要重新预热到就绪')
