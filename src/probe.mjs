@@ -118,6 +118,6 @@ export function summarizeTrackV2Response(rawBody, trackId) {
         bestGear: best,
         hint: fullTrack
             ? `整曲（${gears.length} 档${best ? `，最高 ${best.quality || best.gear} ${Math.round((best.bitrate || 0) / 1000)}kbps` : ''}）`
-            : '只拿到试听片段：账号无该曲目整曲权益，或签名/设备指纹不匹配',
+            : '只拿到试听片段：同一份设备号在别的曲目上能拿到整曲，所以设备号不是变量；这首曲子在当前凭据下只有试听档',
     }
 }

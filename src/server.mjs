@@ -92,7 +92,8 @@ export function createServer({ config, signer }) {
                     bundledBdms: config.bundledBdms,
                     clientDir: config.clientDir,
                     deviceId: maskDeviceId(config.deviceId),
-                    // 设备身份：客户端可以照抄这份，保证「签名器 / URL 参数 / cookie 会话」同设备
+                    // 设备身份：客户端可以照抄这份，保证「签名器 / URL 参数」用同一份设备号
+                    // （上游不要求它等于账号登录设备，见 docs/INVESTIGATION-DEVICE-ENTITLEMENT.md）
                     identity: {
                         device_id: config.deviceId,
                         iid: config.iid,
