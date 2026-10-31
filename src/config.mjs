@@ -48,8 +48,8 @@ function resolveClientDir() {
     return ''
 }
 
-/** bdms.node 路径：客户端里真正干签名的原生模块。 */
-function resolveBdmsModule() {
+/** bdms.node 路径：客户端里真正干签名的原生模块。worker 侧也要用它，但别顺带调 loadConfig()。 */
+export function resolveBdmsModule() {
     const explicit = env('LIBMSSDK_BDMS_MODULE') || env('QISHUI_BDMS_PATH')
     if (explicit) return explicit
     const local = bundledNative().modulePath

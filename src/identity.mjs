@@ -9,8 +9,8 @@
 // 写入只有一个入口 prepareStoredIdentity()：入口命令启动时都会走到它（除了用
 // LIBMSSDK_DEVICE_ID / QISHUI_DEVICE_ID 钉死设备号那种，那时根本不碰身份文件），
 // 所以「只有一个写入者」靠的是独占创建本身 —— 无论哪个进程赢，磁盘上都只有一份。
-// 将来 worker 池落地后，worker 侧改用 readStoredIdentity()，
-// 那条路径上没有任何创建或改写的代码。
+// worker 池（#5）那条路径走的是下面的 readStoredIdentity()，见 src/worker.mjs：
+// 那条路上没有任何创建或改写的代码。
 
 import crypto from 'node:crypto'
 import fs from 'node:fs'
