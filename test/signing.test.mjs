@@ -31,7 +31,7 @@ let baseUrl
 let createServer
 
 before(async () => {
-    ;({ createServer } = await import('../src/server.mjs'))
+    createServer = (await import('../src/server.mjs')).createServer
     const config = loadConfig()
     const signer = new BdmsSigner({ modulePath: config.bdmsModule, deviceId: config.deviceId })
     server = createServer({ config, signer })
@@ -208,6 +208,24 @@ test('老路径非法 JSON 也按 400 INVALID_REQUEST 收口，不是 500', asyn
     const payload = await response.json()
     assert.equal(payload.code, 'INVALID_REQUEST')
     assert.match(payload.error, /不是合法 JSON/)
+})
+
+test('老路径请求体超限也回可读的 400，而不是连接重置', async () => {
+    const config = { ...loadConfig(), maxBodyBytes: 64 }
+    const signer = new BdmsSigner({ modulePath: config.bdmsModule, deviceId: config.deviceId })
+    const capped = createServer({ config, signer })
+    await new Promise(resolve => capped.listen(0, '127.0.0.1', resolve))
+    try {
+        const response = await fetch(`http://127.0.0.1:${capped.address().port}/sign`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' },
+            body: JSON.stringify({ url: 'https://api.qishui.com/x', body: 'x'.repeat(4096) }),
+        })
+        assert.equal(response.status, 400)
+        assert.equal((await response.json()).code, 'INVALID_REQUEST')
+    } finally {
+        await new Promise(resolve => capped.close(resolve))
+    }
 })
 
 test('POST /probe 上游非 200 不再回 502：按内部错误收口并保留诊断字段', async () => {

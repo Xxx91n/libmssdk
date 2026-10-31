@@ -25,8 +25,10 @@ function readBody(request, limit) {
         request.on('data', chunk => {
             size += chunk.length
             if (size > limit) {
+                // 不 destroy：客户端要读得到那句 400，而不是在上传中途拿到连接重置。
+                // 剩下的字节继续排掉，只是不再缓冲（与分发器的处理一致）。
                 reject(new ValidationError(`请求体超过 ${limit} 字节`))
-                request.destroy()
+                request.resume()
                 return
             }
             chunks.push(chunk)
@@ -135,6 +137,8 @@ export function createLegacyHandler({ config, signer, readiness = null }) {
                 throw new ValidationError('请求体不是合法 JSON')
             }
 
+            // 直接构造 createServer 的 /sign 只给本地用例与旧路径；默认路径的模块/配置错误
+            // 由池子的 blocker 报 SIGNER_UNAVAILABLE，不会走到这里。
             if (pathname === '/sign') {
                 const spec = normalizeSignRequest(payload)
                 const signed = signer.sign({

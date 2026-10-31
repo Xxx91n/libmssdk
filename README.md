@@ -115,6 +115,10 @@ export LIBMSSDK_CLIENT_DIR="/path/to/Soda Music/3.7.0"
 | `LIBMSSDK_WORKERS` | worker 进程数；不设则按绑定地址推导（回环 1 个，非回环按物理核的 75%） |
 | `LIBMSSDK_WAIT_BUDGET_MS` | `/sign` 排队预算（默认 5000ms），超出回 503 `BUSY` |
 | `LIBMSSDK_QUEUE_LIMIT` | 等待队列上限（默认 worker 数的 4 倍），排不下当场回 503 |
+| `LIBMSSDK_WARMUP_BUDGET_MS` | 单台 worker 的预热预算（默认 30000ms）；超预算它保持未就绪且进程不退出 |
+
+worker 重生退避（`LIBMSSDK_WORKER_RESPAWN_BASE_MS` / `LIBMSSDK_WORKER_RESPAWN_CAP_MS`）见
+[`.env.example`](.env.example)。
 
 Cloudflare Workers 不能运行 `bdms.node` / `metasecml.dll`，因此不能承载本服务的签名
 执行层。Worker 只能作为鉴权、限流或转发网关。

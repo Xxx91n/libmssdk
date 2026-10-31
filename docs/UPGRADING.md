@@ -61,9 +61,9 @@ worker 数按绑定地址推导，环境变量始终优先：
 - `POST /probe`（上游非 200 时现在回 500 `INTERNAL_ERROR`，不再回 502）
 - `POST /track/stream`
 
-这三个端点的鉴权失败现在与 `/sign` 一样使用 401 `UNAUTHORIZED`。注意 `/probe` 过渡期仍在
-主进程里同步签名（只供手动诊断），调用它会短暂占住主进程事件循环；收拢版本会把它改成
-命令行子命令并删除 HTTP 入口。
+这三个端点的鉴权失败现在与 `/sign` 一样使用 401 `UNAUTHORIZED`。注意 `/probe` 与
+`/track/stream` 过渡期仍在主进程里同步签名，调用它们会短暂占住主进程事件循环；收拢版本
+会把 `/probe` 改成命令行子命令并删除 `/track/stream` 的 HTTP 入口。
 
 ## 5. 升级检查清单
 

@@ -303,6 +303,16 @@ test('退避途中关池子：不再对已经没了的通道 send', async () => 
     )
 })
 
+test('关池子时通道已经坏了：send 抛错不能把 stop 带崩', async () => {
+    const { pool, workers } = healthy(1)
+    await pool.start()
+    // 不触发 exit：槽位还被认为是活的，但通道已经关闭（模拟通道比 exit 先坏）
+    workers[0].exited = true
+
+    await pool.stop()
+    assert.ok(workers[0].killed.length > 0, '坏通道的那台要被直接收掉')
+})
+
 test('干净的 exit(0) 不算进「反复退出」：判据数的是非零退出', async () => {
     let giveUps = 0
     const { pool, workers, spawnOrder } = healthy(1, {

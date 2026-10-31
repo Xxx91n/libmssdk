@@ -259,7 +259,16 @@ export function createWorkerPool({
                 // 死在退避窗口里的槽位手上还是那个已关闭的通道：对它 send 不是返回 false 就完事，
                 // Node 会在 process 上发一个 'error' 事件，把整个主进程掀掉。关池子时跳过。
                 if (slot.dead) continue
-                slot.transport.send({ type: 'shutdown' })
+                try {
+                    slot.transport.send({ type: 'shutdown' })
+                } catch (error) {
+                    // 通道在判死之前就坏了：关池子不该被它带崩，直接把这台收掉。
+                    log('worker-send-failed', {
+                        id: slot.id,
+                        message: redactMachinePaths(String(error?.message || error)),
+                    })
+                    slot.transport.kill()
+                }
             }
         },
     }
