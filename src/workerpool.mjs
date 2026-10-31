@@ -244,6 +244,9 @@ export function createWorkerPool({
         /** 一台一台拉：前一台把冷启动的事做完（就绪 / 预热失败 / 没了）才动下一台。 */
         async start() {
             for (let index = 0; index < workerCount; index += 1) {
+                // 关池子 / 整体放弃之后不能再补进程：新进程没人给它发 shutdown，会把主进程一起挂住。
+                // stop() 只通知已经 attach 的槽位，所以检查必须放在每轮 attach 之前。
+                if (stopping || givenUp) return
                 await attach(index).settled
             }
         },

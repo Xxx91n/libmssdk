@@ -62,10 +62,17 @@ async function commandServe() {
     })
     let closing = false
     const shutdown = () => {
-        if (closing) return
+        // 第二次 Ctrl+C 是逃生口：第一次已经在等在飞请求收尾了，再按就立刻退。
+        if (closing) {
+            process.exit(1)
+            return
+        }
         closing = true
-        pool.stop()
-        server.close(() => process.exit(0))
+        // 先停止接新连接，等在飞/排队请求收完，再收 worker：反过来会把排队中的请求直接掐掉。
+        server.close(() => {
+            pool.stop().finally(() => process.exit(0))
+        })
+        server.closeIdleConnections?.()
     }
     process.on('SIGINT', shutdown)
     process.on('SIGTERM', shutdown)

@@ -7,7 +7,7 @@
 //   POST /track/stream     /probe 的别名（#9 删除）
 //
 // 直接构造 createServer 时仍带 /sign，给本地用例与旧路径用；默认服务不会走到它。
-// #7 的验收是「502 从所有出口消失」，所以这里的失败也改走 classify()。
+// #7 的验收是「502 从所有出口消失」，所以这里的失败也走同一张分类表。
 
 import http from 'node:http'
 import { maskDeviceId } from './config.mjs'
@@ -95,7 +95,7 @@ export function createLegacyHandler({ config, signer, readiness = null }) {
             }
             if (pathname === '/config') {
                 if (!authorized()) {
-                    send(401, errorResponse('unauthorized', 'unauthorized'))
+                    sendFailure(failureResponse(ERROR_KINDS.UNAUTHORIZED, { message: '缺少或错误的 Bearer Token' }))
                     return
                 }
                 send(200, {
@@ -122,11 +122,18 @@ export function createLegacyHandler({ config, signer, readiness = null }) {
                 return
             }
             if (!authorized()) {
-                send(401, errorResponse('unauthorized', 'unauthorized'))
+                sendFailure(failureResponse(ERROR_KINDS.UNAUTHORIZED, { message: '缺少或错误的 Bearer Token' }))
                 return
             }
 
-            const payload = JSON.parse((await readBody(request, config.maxBodyBytes)) || '{}')
+            // readBody 的 ValidationError（体超限）原样保留；只有 JSON 解析失败才是 400。
+            const text = await readBody(request, config.maxBodyBytes)
+            let payload
+            try {
+                payload = JSON.parse(text || '{}')
+            } catch {
+                throw new ValidationError('请求体不是合法 JSON')
+            }
 
             if (pathname === '/sign') {
                 const spec = normalizeSignRequest(payload)

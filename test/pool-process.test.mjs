@@ -123,14 +123,13 @@ const signPayload = (overrides = {}) => ({
 })
 
 async function post(baseUrl, payload) {
-    const startedAt = Date.now()
     const response = await fetch(`${baseUrl}/sign`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(20_000),
     })
-    return { status: response.status, text: await response.text(), elapsedMs: Date.now() - startedAt }
+    return { status: response.status, text: await response.text() }
 }
 
 test('真进程：身份只读、预热自学习、杀在飞的那台之后槽位收得回', async () => {
@@ -202,7 +201,7 @@ test('真进程：身份只读、预热自学习、杀在飞的那台之后槽�
 
 test('真进程多开：并发确实重叠，杀掉一台其余继续服务', async () => {
     const traceDir = tempDir('libmssdk-trace-')
-    const { pool, children, baseUrl } = await startReal({ workers: 2, signDelayMs: 300, traceDir })
+    const { pool, children, baseUrl } = await startReal({ workers: 2, signDelayMs: 500, traceDir })
 
     await until(() => pool.readyCount === 2, '两台都自学习到就绪')
 

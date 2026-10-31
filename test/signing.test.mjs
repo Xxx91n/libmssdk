@@ -134,6 +134,7 @@ test('POST /sign 返回 X-Helios / X-Medusa（含鉴权）', async () => {
         body: JSON.stringify({ url: 'https://api.qishui.com/luna/pc/track_v2' }),
     })
     assert.equal(unauthorized.status, 401)
+    assert.equal((await unauthorized.json()).code, 'UNAUTHORIZED', '老路径与默认路径用同一个原因码')
 
     const response = await fetch(`${baseUrl}/sign`, {
         method: 'POST',
@@ -161,7 +162,7 @@ test('GET /healthz 不泄露凭据', async () => {
     assert.equal(JSON.stringify(payload).includes('7000000000000001'), false)
 })
 
-// 默认路径（src/server.mjs）上同一条防线：解析函数是共用的，行为也得一样。
+// 过渡端点处理器上同一条防线：解析函数与分发器共用，行为也得一样。
 // 修复前 handler 里的 `new URL()` 一抛就是 unhandled rejection（Node 15+ 直接退进程），
 // 一条匿名 `GET //` 就能把服务带走 —— 所以这里断言的是「进程还在、后面的请求还通」。
 test('畸形请求目标与畸形 Host 不会退掉进程', async () => {
@@ -195,6 +196,18 @@ test('GET /healthz 在 worker 预热完成前回 503，就绪后才回 200', asy
     } finally {
         await new Promise(resolve => gated.close(resolve))
     }
+})
+
+test('老路径非法 JSON 也按 400 INVALID_REQUEST 收口，不是 500', async () => {
+    const response = await fetch(`${baseUrl}/sign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' },
+        body: '{"url":',
+    })
+    assert.equal(response.status, 400)
+    const payload = await response.json()
+    assert.equal(payload.code, 'INVALID_REQUEST')
+    assert.match(payload.error, /不是合法 JSON/)
 })
 
 test('POST /probe 上游非 200 不再回 502：按内部错误收口并保留诊断字段', async () => {

@@ -45,6 +45,30 @@ const healthy = (count, options = {}) => {
 
 const job = { url: 'https://api.qishui.com/luna/pc/track_v2?a=1', headers: {}, deviceId: '7000000000000001' }
 
+test('关池子时不再补进程：start 等在上一台时 stop，后面的槽位不 spawn', async () => {
+    const workers = []
+    const spawnOrder = []
+    const pool = createWorkerPool({
+        workerCount: 3,
+        // 不自动就绪：start 会一直停在第一台的 settled 上，给 stop 留出插进来的窗口
+        spawn: index => {
+            const worker = new FakeWorker(index)
+            workers.push(worker)
+            spawnOrder.push(index)
+            return worker
+        },
+        log: () => {},
+    })
+
+    const starting = pool.start()
+    await waitFor(() => spawnOrder.length === 1, '第一台已经拉起')
+    await pool.stop()
+    workers[0].exit(0)
+    await starting
+
+    assert.deepEqual(spawnOrder, [0], 'stop 之后不该再拉起第二、第三台')
+})
+
 test('分发只发给空闲 worker：报告完成之前不回池', async () => {
     const { pool, byId } = healthy(2)
     await pool.start()
