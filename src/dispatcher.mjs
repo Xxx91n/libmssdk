@@ -278,7 +278,7 @@ export function createDispatcher({ config, pool, log = logEvent, fallback = null
             item.startedAt = startedAt
 
             if (pool.blocker) {
-                writeFailure(item, failureResponse(pool.blocker, { message: '签名模块没加载或配置错' }))
+                writeFailure(item, failureResponse(pool.blocker, { message: '签名模块没加载或配置错（含设备身份缺失）' }))
                 return
             }
             if (pool.readyCount === 0) {

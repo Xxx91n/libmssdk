@@ -25,6 +25,7 @@ const { normalizeSignRequest, ValidationError } = await import('../src/contract.
 const { buildTrackV2Request, summarizeTrackV2Response } = await import('../src/probe.mjs')
 const { bundledNative, loadConfig, resolveIdentity } = await import('../src/config.mjs')
 const { randomDeviceId } = await import('../src/identity.mjs')
+const { workerEnvFor } = await import('../src/serve.mjs')
 
 let server
 let baseUrl
@@ -307,6 +308,20 @@ test('POST /probe 命中整曲时返回完整档位', async () => {
     } finally {
         globalThis.fetch = originalFetch
     }
+})
+
+test('身份只在内存里时，主进程把已解析的设备号交给 worker', () => {
+    const env = { PATH: 'x' }
+    assert.deepEqual(workerEnvFor({ identityPersisted: false, deviceId: '7000000000000001' }, env), {
+        PATH: 'x',
+        LIBMSSDK_DEVICE_ID: '7000000000000001',
+    })
+    assert.equal(
+        workerEnvFor({ identityPersisted: true, deviceId: '7000000000000001' }, env),
+        env,
+        '落盘成功时仍让 worker 只读身份文件',
+    )
+    assert.equal(workerEnvFor({ identityPersisted: false, deviceId: '' }, env), env, '没有设备号就不要伪造一个')
 })
 
 test('原生模块默认不随仓库提供，必须由用户配置', () => {
