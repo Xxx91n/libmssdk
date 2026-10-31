@@ -28,9 +28,10 @@ const { randomDeviceId } = await import('../src/identity.mjs')
 
 let server
 let baseUrl
+let createServer
 
 before(async () => {
-    const { createServer } = await import('../src/server.mjs')
+    ;({ createServer } = await import('../src/server.mjs'))
     const config = loadConfig()
     const signer = new BdmsSigner({ modulePath: config.bdmsModule, deviceId: config.deviceId })
     server = createServer({ config, signer })
@@ -173,6 +174,74 @@ test('畸形请求目标与畸形 Host 不会退掉进程', async () => {
     const badHost = await rawExchange(port, { requestLine: 'GET /healthz', headers: { host: 'a b' } })
     assert.match(badHost.text, /^HTTP\/1\.1 200 /, 'Host 不参与解析：健康检查照旧')
     assert.match(badHost.text, /"ok":true/)
+})
+
+test('GET /healthz 在 worker 预热完成前回 503，就绪后才回 200', async () => {
+    let ready = false
+    const config = loadConfig()
+    const signer = new BdmsSigner({ modulePath: config.bdmsModule, deviceId: config.deviceId })
+    const gated = createServer({ config, signer, readiness: () => ready })
+    await new Promise(resolve => gated.listen(0, '127.0.0.1', resolve))
+    const url = `http://127.0.0.1:${gated.address().port}/healthz`
+    try {
+        const warming = await fetch(url)
+        assert.equal(warming.status, 503, '预热未完成时不能让编排器以为已就绪')
+        assert.equal((await warming.json()).ready, false)
+
+        ready = true
+        const serving = await fetch(url)
+        assert.equal(serving.status, 200)
+        assert.equal((await serving.json()).ready, true)
+    } finally {
+        await new Promise(resolve => gated.close(resolve))
+    }
+})
+
+test('POST /probe 上游非 200 不再回 502：按内部错误收口并保留诊断字段', async () => {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async () => new Response('', { status: 403 })
+    try {
+        const response = await originalFetch(`${baseUrl}/probe`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' },
+            body: JSON.stringify({ track_id: '7501674235158431760' }),
+        })
+        assert.equal(response.status, 500)
+        const payload = await response.json()
+        assert.equal(payload.code, 'INTERNAL_ERROR')
+        assert.equal(payload.http, 403, '上游状态码仍留在诊断字段里')
+        assert.equal(response.headers.get('retry-after'), null)
+    } finally {
+        globalThis.fetch = originalFetch
+    }
+})
+
+test('签名器内部抛错也不再回 502：老路径同样按 INTERNAL_ERROR 收口', async () => {
+    const config = loadConfig()
+    const broken = createServer({
+        config,
+        signer: {
+            available: true,
+            deviceId: config.deviceId,
+            sign() {
+                throw new Error('原生模块炸了')
+            },
+        },
+    })
+    await new Promise(resolve => broken.listen(0, '127.0.0.1', resolve))
+    try {
+        const response = await fetch(`http://127.0.0.1:${broken.address().port}/sign`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' },
+            body: JSON.stringify({ url: 'https://api.qishui.com/luna/pc/track_v2' }),
+        })
+        assert.equal(response.status, 500)
+        const payload = await response.json()
+        assert.equal(payload.code, 'INTERNAL_ERROR')
+        assert.match(payload.error, /原生模块炸了/)
+    } finally {
+        await new Promise(resolve => broken.close(resolve))
+    }
 })
 
 test('POST /probe 命中整曲时返回完整档位', async () => {
