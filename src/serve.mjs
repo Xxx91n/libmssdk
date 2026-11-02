@@ -139,6 +139,7 @@ export function watchCloseFile({ file, token = '', onSignal, intervalMs = 200 })
         return () => {}
     }
     let fired = false
+    let warned = false
     const timer = setInterval(() => {
         if (fired) return
         try {
@@ -149,7 +150,12 @@ export function watchCloseFile({ file, token = '', onSignal, intervalMs = 200 })
                 // 没有 token 的形态只能靠基线：启动时就在的那一份不触发
                 return
             }
-        } catch {
+        } catch (error) {
+            // 读不动就告警一次；静默降级会让「没有 event=shutdown」的排障线索失真
+            if (!warned) {
+                warned = true
+                logWarn('close-read-failed', { reason: redactMachinePaths(String(error?.message || error)) })
+            }
             return
         }
         fired = true

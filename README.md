@@ -117,6 +117,7 @@ export LIBMSSDK_CLIENT_DIR="/path/to/Soda Music/3.7.0"
 | `LIBMSSDK_QUEUE_LIMIT` | 等待队列上限（默认 worker 数的 4 倍），排不下当场回 503 |
 | `LIBMSSDK_WARMUP_BUDGET_MS` | 单台 worker 的预热预算（默认 30000ms）；超预算它保持未就绪且进程不退出 |
 | `LIBMSSDK_DRAIN_DELAY_MS` | 收尾排空窗口（默认 0）：`markClosing()` 之后先保持监听，让 `/readyz` 的 503 被读到，再停监听；容器 compose 默认 8 秒并配 `stop_grace_period: 30s` |
+| `LIBMSSDK_CLOSE_TOKEN` | 容器入口每轮生成、写进 `closing.flag` 的随机值；服务只认本轮 token。由入口管理，别在 `.env` / compose 里手工固定（固定值会让遗留标志在重启后仍然匹配） |
 | `LIBMSSDK_RATE_LIMIT_PER_SECOND` / `LIBMSSDK_RATE_LIMIT_BURST` | 单 IP 持续速率与突发额度（默认 0.5 次/秒、12） |
 | `LIBMSSDK_RATE_LIMIT_MAX_BUCKETS` | 限流桶上限（默认 4096），满了挤掉最久没动的桶 |
 | `LIBMSSDK_RATE_LIMIT_MODE` | 启动模式：`enforce` / `log` / `off`（默认 `enforce`） |
