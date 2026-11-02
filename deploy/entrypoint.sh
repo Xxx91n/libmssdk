@@ -31,11 +31,10 @@ set -m
 state_dir="${LIBMSSDK_STATE_DIR:-/app/data}"
 close_file="${state_dir}/closing.flag"
 # 每轮一个随机 token：写进 closing.flag 的内容，服务只认本轮的值。这样「启动途中写下的标志」
-# 与「上一轮的残留」不需要靠时间戳区分 —— 旧内容天然不匹配。
+# 与「上一轮的残留」不需要靠时间戳区分 —— 旧内容天然不匹配，也不要在这里删标志（会抢别人的触发）。
 close_token=$(od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \n' || true)
-[ -n "$close_token" ] || close_token="run-$$-$(date +%s)"
+[ -n "$close_token" ] || close_token="run-$$-$(date +%s%N)-$RANDOM$RANDOM"
 export LIBMSSDK_CLOSE_TOKEN="$close_token"
-rm -f "$close_file" 2>/dev/null || true
 
 child=''
 stop_requested=0

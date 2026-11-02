@@ -84,8 +84,9 @@ bash verify/wine-multi/run.sh --mode mock
 的 serve 进程的 `/readyz`，把观察到的形态序列记进结果的 `observations.stopObservation`。判据 4 已经杀掉
 一个进程，它的端口注定是连接被拒，所以不参与这一条：把死掉的端口也算进去，证据会永远翻成 `mixed`。
 
-- 期望 `saw-503`：`container-entry.sh` 收到 `SIGTERM` 后写 `/app/data/closing.flag`，每个 serve 轮询到它
-  先改口 `/readyz`、排空窗口里仍在监听，窗口结束才停监听、收在飞请求；之后才变成连接被拒。
+- 期望 `saw-503`：`container-entry.sh` 收到 `SIGTERM` 后写 `/app/data/closing.flag`（内容是本轮 token），
+  每个 serve 轮询到它先改口 `/readyz`、排空窗口里仍在监听，窗口结束才停监听、收在飞请求；之后才变成
+  连接被拒。成功收尾会在 serve 日志里留下 `event=shutdown`（`source: file`）。
 - `refused-only` 说明触发没生效（标志没写成功、state 目录不对或排空窗口为 0）：容器形态退化成
   「进程直接消失」。第一轮真机取证就是这一形态：入口转发的 `SIGINT` 到不了 Node，所以改成了文件触发。
 - `mixed` 表示两个进程观察不一致，按结果里的 `sequences` 人工核对。

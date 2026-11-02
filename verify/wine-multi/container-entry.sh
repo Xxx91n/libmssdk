@@ -36,9 +36,8 @@ set -m
 # SIGINT 只作为别的 Wine 版本上能走信号快路的补充。两个 serve 共用 /app/data，
 # 一个标志会让两边都收尾；标志内容是本轮随机 token，旧标志天然不匹配，触发后不删。
 close_token=$(od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \n' || true)
-[ -n "$close_token" ] || close_token="run-$$-$(date +%s)"
+[ -n "$close_token" ] || close_token="run-$$-$(date +%s%N)-$RANDOM$RANDOM"
 export LIBMSSDK_CLOSE_TOKEN="$close_token"
-rm -f /app/data/closing.flag 2>/dev/null || true
 
 SERVE_PIDS=()
 stop_requested=0

@@ -72,6 +72,7 @@ test('关闭标志：写 closing.flag 触发收尾；残留标志忽略、在飞
     fs.writeFileSync(flag, 'old-token')
 
     const workers = []
+    const logged = []
     let exitCode = null
     const entry = startServe({
         config: {
@@ -86,7 +87,7 @@ test('关闭标志：写 closing.flag 触发收尾；残留标志忽略、在飞
             drainDelayMs: 300,
         },
         env: { LIBMSSDK_WORKERS: '1' },
-        log: () => {},
+        log: (event, detail) => logged.push({ event, detail }),
         onExit: code => {
             exitCode = code
         },
@@ -162,6 +163,10 @@ test('关闭标志：写 closing.flag 触发收尾；残留标志忽略、在飞
         assert.equal(fs.existsSync(flag), true, '标志不删：多进程共用 state 时不能由第一个看到的进程删掉')
         const shutdowns = workers[0].sent.filter(message => message.type === 'shutdown').length
         assert.equal(shutdowns, 1, '两个触发源只该跑一次收尾')
+        assert.ok(
+            logged.some(item => item.event === 'shutdown' && item.detail?.source === 'file'),
+            '文件触发要记 event=shutdown（source: file），排障才分得清成败',
+        )
     } finally {
         entry.stopWatching()
         await new Promise(resolve => entry.server.close(resolve))
@@ -213,6 +218,67 @@ test('关闭标志：启动途中写下的本轮 token 仍然生效', async () =
         assert.equal(exitCode, 0, '启动途中写下的本轮标志必须触发收尾，而不是被当成残留')
         const shutdowns = workers[0].sent.filter(message => message.type === 'shutdown').length
         assert.equal(shutdowns, 1, '收尾只跑一次')
+    } finally {
+        entry.stopWatching()
+        await new Promise(resolve => entry.server.close(resolve))
+        fs.rmSync(dir, { recursive: true, force: true })
+    }
+})
+
+// 没给 token 的本机用法（直接 `node src/index.mjs serve`）仍走基线：启动时已有的标志忽略，
+// 之后新写入的才触发。这条分支不能被 token 用例挤掉。
+test('关闭标志：没有 token 时按基线忽略启动残留，新写入才触发', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'libmssdk-close-baseline-'))
+    const identityFile = path.join(dir, 'identity.json')
+    const flag = path.join(dir, 'closing.flag')
+    fs.writeFileSync(identityFile, '{"device_id":"7000000000000001"}')
+    fs.writeFileSync(flag, 'anything-before-start')
+
+    const workers = []
+    let exitCode = null
+    const entry = startServe({
+        config: {
+            version: 'test',
+            host: '127.0.0.1',
+            token: '',
+            deviceId: '7000000000000001',
+            maxBodyBytes: 256 * 1024,
+            identityPersisted: true,
+            identityFile,
+            drainDelayMs: 0,
+        },
+        env: { LIBMSSDK_WORKERS: '1' },
+        log: () => {},
+        onExit: code => {
+            exitCode = code
+        },
+        spawn: index => {
+            const worker = new FakeWorker(index)
+            workers.push(worker)
+            return worker
+        },
+    })
+    await new Promise(resolve => entry.server.listen(0, '127.0.0.1', resolve))
+    const { port } = entry.server.address()
+    const readyz = () =>
+        new Promise((resolve, reject) => {
+            const request = http.request({ host: '127.0.0.1', port, path: '/readyz', agent: false }, response => {
+                response.resume()
+                response.on('end', () => resolve(response.statusCode))
+            })
+            request.on('error', reject)
+            request.end()
+        })
+    try {
+        workers[0].reportReady()
+        await new Promise(resolve => setTimeout(resolve, 400))
+        assert.equal(await readyz(), 200, '启动时已有的标志不该触发')
+
+        fs.writeFileSync(flag, 'anything-after-start')
+        for (let attempt = 0; attempt < 150 && exitCode === null; attempt += 1) {
+            await new Promise(resolve => setTimeout(resolve, 20))
+        }
+        assert.equal(exitCode, 0, '启动之后写入的标志应当触发收尾')
     } finally {
         entry.stopWatching()
         await new Promise(resolve => entry.server.close(resolve))

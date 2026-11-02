@@ -58,7 +58,8 @@ SIGKILL。文件不经过 Wine 的信号语义，是可靠的那条路；`SIGINT
 
 - **触发文件**：入口每轮生成一个随机 token 写进 `closing.flag`，服务只认本轮的值。上一轮的残留、
   「spawn 之后、Node 启动之前」写下的标志都能被正确区分（前者忽略、后者生效）；触发后不删，
-  多个 serve 共用同一份 state 时都能看到。
+  多个 serve 共用同一份 state 时都能看到。token 由入口生成，别手工固定（固定值会让遗留标志在重启后
+  仍然匹配）。
 - **日志口径**：文件触发成功会记 `event=shutdown`（`source: file`）。看不到它才说明触发没送到。
 - **排空窗口**：`deploy/docker-compose.yml` 把 `LIBMSSDK_DRAIN_DELAY_MS` 默认设成 8 秒（`deploy/.env`
   可覆盖，设 0 = 信号一到就停监听）；直接用 `docker run` 跑镜像时用的是代码默认值 0，探针可能只看到
